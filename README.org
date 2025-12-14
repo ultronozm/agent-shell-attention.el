@@ -87,11 +87,12 @@ KnockKnock notifications (see [[https://github.com/konrad1977/knockknock][knockk
 Here is a complete example using =elpaca= (replace the repo with your fork/location):
 
 #+begin_src emacs-lisp
-(elpaca (agent-shell-attention :repo "YOURNAME/agent-shell-attention")
-  (require 'agent-shell-attention)
-
-  (keymap-set agent-shell-attention-mode-map "C-z a" #'agent-shell-attention-jump)
-
+(use-package agent-shell-attention
+  :ensure (:host github :repo "ultronozm/agent-shell-attention.el")
+  :after agent-shell
+  :bind (:map agent-shell-attention-mode-map
+              ("C-z a" . agent-shell-attention-jump))
+  :config
   (require 'knockknock)
   (setopt agent-shell-attention-notify-function
           (lambda (_buffer title body)
@@ -100,6 +101,5 @@ Here is a complete example using =elpaca= (replace the repo with your fork/locat
              :message body
              :icon "nf-cod-bot"
              :duration 5)))
-
-  (agent-shell-attention-mode 1))
+  (agent-shell-attention-mode))
 #+end_src
