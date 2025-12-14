@@ -84,12 +84,13 @@ KnockKnock notifications (see [[https://github.com/konrad1977/knockknock][knockk
 
 * Example configuration
 
-Here is a complete example using =elpaca= (replace the repo with your fork/location):
+Here is a complete example config using [[https://github.com/progfolio/elpaca][elpaca]]:
 
 #+begin_src emacs-lisp
 (use-package agent-shell-attention
   :ensure (:host github :repo "ultronozm/agent-shell-attention.el")
   :after agent-shell
+  :demand
   :bind (:map agent-shell-attention-mode-map
               ("C-z a" . agent-shell-attention-jump))
   :config
