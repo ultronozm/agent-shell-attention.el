@@ -11,12 +11,16 @@ Enable the global minor mode:
 (agent-shell-attention-mode 1)
 #+end_src
 
-When one or more agent buffers need attention, an =AS:n= indicator appears in the mode line.
+When one or more agent buffers need attention, an =AS:n= indicator appears in the mode line (pending buffers).  Busy-but-not-pending work is not counted unless you opt in to the =AS:n/m= indicator (see below).
 
-- Click =AS:n= to pick a pending agent buffer from a menu.
+- Click the indicator to pick a pending agent buffer from a menu.
 - Use =M-x agent-shell-attention-jump= to jump to a pending buffer from the keyboard.
   - Without a prefix argument, it jumps to the oldest pending buffer.
   - With =C-u=, it prompts with completion.
+
+"Awaiting reply" prompts clear when you visit the buffer, while "tool permission" prompts remain pending until you actually respond.
+
+* Basic customization
 
 To bind the jump command when the minor mode is active:
 
@@ -24,19 +28,26 @@ To bind the jump command when the minor mode is active:
 (keymap-set agent-shell-attention-mode-map "C-z a" #'agent-shell-attention-jump)
 #+end_src
 
-To have the indicator appear even when *no* agents need attention, as =AS:0=:
+To display the number of pending *and* busy buffers as =AS:n/m=:
 
 #+begin_src emacs-lisp
 (setopt agent-shell-attention-render-function
-        (lambda (count _entries)
-          (format " AS:%d" count)))
+        #'agent-shell-attention-render-active)
 #+end_src
+
+To show an indicator even when nothing is pending (for example, =AS:0= or =AS:0/0=), set:
+
+#+begin_src emacs-lisp
+(setopt agent-shell-attention-show-zeros t)
+#+end_src
+
+With =agent-shell-attention-render-active=, keep the active lighter as ~" AS:%d/%d"~ if you prefer =AS:0/0= when idle.
 
 * Notifications
 
 =agent-shell-attention= always echoes a short message when an agent finishes a turn or asks for permission.
 
-To also show external notifications, set =agent-shell-attention-notify-function=.
+To also show external notifications, set =agent-shell-attention-notify-function=, as follows.
 
 Built-in desktop notifications (via =notifications-notify=):
 
@@ -57,11 +68,12 @@ KnockKnock notifications (see [[https://github.com/konrad1977/knockknock][knockk
            :duration 5)))
 #+end_src
 
-* Customization
+* Further customization
 
 =M-x customize-group RET agent-shell-attention RET=.
 
-- Change the mode-line text with =agent-shell-attention-lighter=.
+- The lighter text is controlled by =agent-shell-attention-lighter= (default: ~" AS:%d"~) or =agent-shell-attention-render-active= (default: ~" AS:%d/%d"~) according to whether =agent-shell-attention-render-function= is =agent-shell-attention-render-pending= or =agent-shell-attention-render-active=.
+
 - Choose where the indicator is installed with =agent-shell-attention-indicator-location=.  Set it to =mode-line-misc-info= (default) to sit next to other minor-mode indicators, or to =global-mode-string= if you prefer it near clock/battery status:
 
 #+begin_src emacs-lisp
@@ -102,5 +114,8 @@ Here is a complete example config using [[https://github.com/progfolio/elpaca][e
              :message body
              :icon "nf-cod-bot"
              :duration 5)))
+  (setopt agent-shell-attention-render-function
+          #'agent-shell-attention-render-active)
+  (setopt agent-shell-attention-indicator-location 'global-mode-string)
   (agent-shell-attention-mode))
 #+end_src
