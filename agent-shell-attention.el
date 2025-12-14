@@ -1,0 +1,583 @@
+;;; agent-shell-attention.el --- Mode-line attention tracker for agent-shell  -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2025  Paul D. Nelson
+
+;; Author: Paul D. Nelson <ultrono@gmail.com>
+;; Version: 0.0.0
+;; URL: https://github.com/ultronozm/agent-shell-attention.el
+;; Package-Requires: ((emacs "29.1") (agent-shell "0.24.2"))
+;; Keywords: convenience
+
+;; This program is free software; you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+;;; Commentary:
+
+;; `agent-shell-attention-mode' instruments the `agent-shell' prompt
+;; flow to keep track of buffers that are waiting for user input.  It
+;; displays a clickable `AS:n' indicator in the mode line, provides a
+;; command `agent-shell-attention-jump' to visit pending buffers, and
+;; can optionally issue notifications via a user-defined function.
+;;
+;; Enable with (agent-shell-attention-mode).
+;;
+;;; Code:
+
+(require 'cl-lib)
+(require 'easymenu)
+(require 'map)
+
+(declare-function notifications-notify "notifications")
+(declare-function agent-shell--on-request "agent-shell")
+(declare-function agent-shell--send-command "agent-shell")
+(declare-function agent-shell--stop-reason-description "agent-shell")
+(declare-function acp-send-request "acp")
+
+(defgroup agent-shell-attention nil
+  "Mode-line tally and minibuffer notifications for agent-shell buffers."
+  :group 'agent-shell
+  :prefix "agent-shell-attention-")
+
+;;; Basic customizations
+
+(defcustom agent-shell-attention-awaiting-stop-reasons '("end_turn")
+  "Stop reasons that indicate the agent expects further input.
+Each entry should be a string that matches the ACP stopReason field."
+  :type '(repeat string))
+
+(defcustom agent-shell-attention-lighter " AS:%d"
+  "String shown in the mode line indicator.
+The token `%d' is replaced with the number of buffers waiting for
+attention.  Set to nil to hide the lighter entirely."
+  :type '(choice (const :tag "Hide indicator" nil)
+                 string))
+
+(defcustom agent-shell-attention-message-prefix "[agent-shell]"
+  "Prefix used for minibuffer notifications."
+  :type 'string)
+
+;;; Notifications
+
+(defun agent-shell-attention-notify-default (_buffer title body)
+  "Send TITLE/BODY notification via `notifications-notify'."
+  (when (require 'notifications nil t)
+    (notifications-notify
+     :app-name "agent-shell"
+     :title title
+     :body body)))
+
+(defcustom agent-shell-attention-notify-function nil
+  "Function used to emit optional notifications.
+
+When non-nil, it is called with three arguments: BUFFER, TITLE, and
+BODY.  Set this to nil to disable notifications entirely.
+
+The helper `agent-shell-attention-notify-default' uses
+`notifications-notify'."
+  :type '(choice (const :tag "Disable notifications" nil)
+                 (const :tag "Use built-in notifications"
+                        agent-shell-attention-notify-default)
+                 function))
+
+;;; Display-buffer
+
+(defun agent-shell-attention-display-buffer-across-tabs (buffer _alist)
+  "Display BUFFER by reusing an existing window across tabs in this frame.
+
+Return the window that shows BUFFER, or nil to let other display actions
+run.  If `tab-bar-mode' is enabled and BUFFER is visible in another tab
+of the current frame, switch to that tab and reuse its window."
+  (when (and (bound-and-true-p tab-bar-mode)
+             (fboundp 'tab-bar-tabs)
+             (fboundp 'tab-bar-select-tab))
+    (let* ((frame (selected-frame))
+           (tabs (tab-bar-tabs))
+           (current (when (fboundp 'tab-bar--current-tab)
+                      (tab-bar--current-tab)))
+           (current-index (or (and current
+                                   (cl-position current tabs :test #'equal))
+                              0))
+           (current-tab-number (1+ current-index))
+           (target-window nil)
+           (found nil))
+      (let ((inhibit-redisplay t))
+        (unwind-protect
+            (progn
+              (cl-loop for i from 0 below (length tabs)
+                       while (not found)
+                       do (unless (= i current-index)
+                            (tab-bar-select-tab (1+ i))
+                            (setq target-window
+                                  (get-buffer-window buffer frame))
+                            (when (window-live-p target-window)
+                              (setq found t))))
+              (when found target-window))
+          (unless found
+            (ignore-errors (tab-bar-select-tab current-tab-number))))))))
+
+(defcustom agent-shell-attention-display-buffer-action
+  '((display-buffer-reuse-window
+     agent-shell-attention-display-buffer-across-tabs
+     display-buffer-same-window))
+  "Display action used by `agent-shell-attention-jump'.
+
+This is passed as ACTION to `pop-to-buffer'.  The default prefers an
+existing window showing the buffer in the current frame.  If
+`tab-bar-mode' is enabled it will also look across tabs in the same
+frame."
+  :type 'sexp)
+
+(defvar agent-shell-attention--pending (make-hash-table :test #'eq)
+  "Table of `agent-shell-mode' buffers awaiting user input.")
+
+;;; Mode-line
+
+(defcustom agent-shell-attention-render-function
+  #'agent-shell-attention-render-default
+  "Function used to render the attention indicator.
+
+The function is called with two arguments: COUNT (number of pending
+agent buffers) and ENTRIES (an alist of (BUFFER . ENTRY) as returned by
+`agent-shell-attention--pending-live-entries').
+
+It should return a string suitable for `format-mode-line', or nil/empty
+string for no indicator."
+  :type 'function)
+
+(defun agent-shell-attention--indicator ()
+  "Return the rendered indicator for pending agent shells."
+  (let* ((entries (agent-shell-attention--pending-live-entries))
+         (count (length entries)))
+    (condition-case err
+        (or (funcall agent-shell-attention-render-function count entries) "")
+      (error
+       (message "agent-shell-attention render error: %s" err)
+       ""))))
+
+(defvar agent-shell-attention-mode-line-construct
+  '(:eval (agent-shell-attention--indicator))
+  "Mode-line construct for `agent-shell-attention-mode'.")
+
+(put 'agent-shell-attention-mode-line-construct 'risky-local-variable t)
+
+(defvar agent-shell-attention--mode-line
+  agent-shell-attention-mode-line-construct
+  "Interned mode-line entry reused in `mode-line-misc-info'.")
+
+(defun agent-shell-attention-tab-bar-format ()
+  "Return a `tab-bar-format' entry that renders the indicator.
+Useful when users want only this indicator in the tab bar instead of
+mirroring the entire `global-mode-string'."
+  `((global menu-item ,(format-mode-line
+                        agent-shell-attention-mode-line-construct)
+            ignore)))
+
+(defcustom agent-shell-attention-indicator-location 'mode-line-misc-info
+  "Where to install the `AS:n' indicator.
+
+When set to `mode-line-misc-info', the indicator lives in
+`mode-line-misc-info'.  When set to `global-mode-string', it lives in
+`global-mode-string' (which some setups also show in the tab bar via
+`tab-bar-format-global')."
+  :type '(choice (const :tag "Mode line misc info" mode-line-misc-info)
+                 (const :tag "Global mode string" global-mode-string))
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (when (bound-and-true-p agent-shell-attention-mode)
+           (agent-shell-attention--apply-indicator-location)))
+  :group 'agent-shell-attention)
+
+(defun agent-shell-attention--apply-indicator-location ()
+  "Apply `agent-shell-attention-indicator-location' to the mode line."
+  (let ((indicator agent-shell-attention--mode-line))
+    ;; Remove from both lists first to avoid duplicates.
+    (setq mode-line-misc-info (delq indicator mode-line-misc-info))
+    (setq global-mode-string (delq indicator global-mode-string))
+    (setq-default mode-line-misc-info
+                  (delq indicator (default-value 'mode-line-misc-info)))
+    (setq-default global-mode-string
+                  (delq indicator (default-value 'global-mode-string)))
+    (pcase agent-shell-attention-indicator-location
+      ('mode-line-misc-info
+       (unless (member indicator mode-line-misc-info)
+         (setq mode-line-misc-info
+               (append mode-line-misc-info (list indicator))))
+       (unless (member indicator (default-value 'mode-line-misc-info))
+         (setq-default mode-line-misc-info
+                       (append (default-value 'mode-line-misc-info)
+                               (list indicator)))))
+      ('global-mode-string
+       (unless (member indicator global-mode-string)
+         (setq global-mode-string
+               (append global-mode-string (list indicator))))
+       (unless (member indicator (default-value 'global-mode-string))
+         (setq-default global-mode-string
+                       (append (default-value 'global-mode-string)
+                               (list indicator))))))
+    (force-mode-line-update t)))
+
+;;; Pending buffer bookkeeping
+
+(defun agent-shell-attention--pending-live-entries ()
+  "Return alist of live buffers needing attention.
+Each entry is of the form (BUFFER . STOP-REASON).  This call also purges
+stale entries for dead buffers."
+  (let ((entries nil)
+        (stale nil))
+    (maphash (lambda (buffer stop-reason)
+               (if (buffer-live-p buffer)
+                   (push (cons buffer stop-reason) entries)
+                 (push buffer stale)))
+             agent-shell-attention--pending)
+    (dolist (buffer stale)
+      (remhash buffer agent-shell-attention--pending))
+    (nreverse entries)))
+
+(defun agent-shell-attention--pending-entry-label (entry)
+  "Return the descriptive label stored in ENTRY."
+  (if (consp entry)
+      (car entry)
+    entry))
+
+(defun agent-shell-attention--pending-entry-timestamp (entry)
+  "Return the timestamp stored in ENTRY or 0 if missing."
+  (if (consp entry)
+      (cdr entry)
+    0.0))
+
+(defun agent-shell-attention--buffer-selected-p (buffer)
+  "Return non-nil if BUFFER is currently shown in the selected window."
+  (let ((window (selected-window)))
+    (and (window-live-p window)
+         (eq buffer (window-buffer window)))))
+
+(defun agent-shell-attention--should-notify-buffer (buffer)
+  "Return non-nil when BUFFER warrants notifications or lighter updates."
+  (not (agent-shell-attention--buffer-selected-p buffer)))
+
+(defun agent-shell-attention--awaiting-p (stop-reason)
+  "Return non-nil when STOP-REASON should mark a buffer as awaiting input."
+  (and stop-reason
+       (member stop-reason agent-shell-attention-awaiting-stop-reasons)))
+
+(defun agent-shell-attention--describe-stop (stop-reason)
+  "Return human-readable text for STOP-REASON."
+  (if (and stop-reason (fboundp 'agent-shell--stop-reason-description))
+      (agent-shell--stop-reason-description stop-reason)
+    (or stop-reason "Finished")))
+
+(defun agent-shell-attention--extract-message (object)
+  "Return best-effort message string from OBJECT."
+  (cond
+   ((stringp object) object)
+   ((null object) nil)
+   (t (or (ignore-errors (map-elt object 'message))
+          (ignore-errors (map-elt object 'code))))))
+
+(defun agent-shell-attention--maybe-notify (buffer title body)
+  "Show notification for BUFFER with TITLE and BODY when configured."
+  (when agent-shell-attention-notify-function
+    (condition-case err
+        (funcall agent-shell-attention-notify-function buffer title body)
+      (error
+       (message "agent-shell-attention notification error: %s" err)))))
+
+(defun agent-shell-attention--message (buffer text)
+  "Display TEXT as a minibuffer notification for BUFFER."
+  (when (agent-shell-attention--should-notify-buffer buffer)
+    (let ((title (format "%s agent" (buffer-name buffer))))
+      (message "%s %s: %s"
+               agent-shell-attention-message-prefix
+               (buffer-name buffer)
+               text)
+      (agent-shell-attention--maybe-notify buffer title text))))
+
+(defun agent-shell-attention--on-buffer-killed ()
+  "Buffer-local hook to keep the pending table tidy."
+  (when (gethash (current-buffer) agent-shell-attention--pending)
+    (remhash (current-buffer) agent-shell-attention--pending)
+    (force-mode-line-update t)))
+
+(defun agent-shell-attention--clear-buffer (buffer)
+  "Remove BUFFER from the pending table and refresh the mode line."
+  (when (gethash buffer agent-shell-attention--pending)
+    (remhash buffer agent-shell-attention--pending)
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (remove-hook 'kill-buffer-hook
+                     #'agent-shell-attention--on-buffer-killed t)))
+    (force-mode-line-update t)))
+
+(defun agent-shell-attention--maybe-clear-current ()
+  "Clear the currently selected buffer if it no longer needs attention."
+  (when (derived-mode-p 'agent-shell-mode)
+    (agent-shell-attention--clear-buffer (current-buffer))))
+
+;;; Navigation UI
+
+(defun agent-shell-attention--entry-label (buffer entry)
+  "Return label for BUFFER with ENTRY text."
+  (format "%s — %s"
+          (buffer-name buffer)
+          (agent-shell-attention--pending-entry-label entry)))
+
+(defun agent-shell-attention--entry-older-p (entry-a entry-b)
+  "Return non-nil when ENTRY-A is older than ENTRY-B."
+  (< (agent-shell-attention--pending-entry-timestamp (cdr entry-a))
+     (agent-shell-attention--pending-entry-timestamp (cdr entry-b))))
+
+(defun agent-shell-attention--unique-candidates (entries)
+  "Return an alist of (DISPLAY . BUFFER) built from ENTRIES.
+
+ENTRIES is an alist of (BUFFER . ENTRY).  DISPLAY strings are made
+unique if multiple entries would otherwise collide."
+  (let ((seen (make-hash-table :test #'equal))
+        (candidates nil))
+    (dolist (entry entries)
+      (let* ((buffer (car entry))
+             (label (agent-shell-attention--entry-label buffer (cdr entry)))
+             (count (gethash label seen 0))
+             (unique (if (zerop count)
+                         label
+                       (format "%s <%d>" label (1+ count)))))
+        (puthash label (1+ count) seen)
+        (push (cons unique buffer) candidates)))
+    (nreverse candidates)))
+
+(defun agent-shell-attention--jump-to-buffer (buffer)
+  "Switch to BUFFER and clear its pending state."
+  (when (buffer-live-p buffer)
+    (agent-shell-attention--clear-buffer buffer)
+    (pop-to-buffer buffer agent-shell-attention-display-buffer-action)))
+
+(defun agent-shell-attention--build-menu (entries)
+  "Create popup menu for ENTRIES.
+ENTRIES is an alist of (BUFFER . STOP-REASON)."
+  (easy-menu-create-menu
+   "Agent Shell Attention"
+   (mapcar (lambda (entry)
+             (vector (agent-shell-attention--entry-label (car entry)
+                                                         (cdr entry))
+                     `(agent-shell-attention--jump-to-buffer ',(car entry))
+                     t))
+           entries)))
+
+;;;###autoload
+(defun agent-shell-attention-jump (&optional prompt)
+  "Jump to an agent-shell buffer awaiting your response.
+
+With PROMPT (prefix argument), select the target buffer using
+`completing-read'.  Without it, jump to the oldest pending buffer."
+  (interactive "P")
+  (let* ((entries (copy-sequence (agent-shell-attention--pending-live-entries)))
+         (sorted (sort entries #'agent-shell-attention--entry-older-p)))
+    (cond
+     ((null sorted)
+      (message "No agent-shell buffers awaiting replies"))
+     (prompt
+      (let* ((candidates (agent-shell-attention--unique-candidates sorted))
+             (choice (completing-read "Agent shell: " candidates nil t))
+             (buffer (cdr (assoc choice candidates))))
+        (when (buffer-live-p buffer)
+          (agent-shell-attention--jump-to-buffer buffer))))
+     (t
+      (agent-shell-attention--jump-to-buffer (caar sorted))))))
+
+(defun agent-shell-attention-open-menu (&optional event)
+  "Show pending agent-shell buffers in a popup menu.
+EVENT is the mouse event used to trigger the menu."
+  (interactive (list last-nonmenu-event))
+  (let ((entries (agent-shell-attention--pending-live-entries)))
+    (if (null entries)
+        (message "No agent-shell buffers awaiting replies")
+      (popup-menu (agent-shell-attention--build-menu entries) event))))
+
+(defvar agent-shell-attention--mode-line-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mode-line down-mouse-1] #'agent-shell-attention-open-menu)
+    (define-key map [mode-line mouse-1] #'ignore)
+    (define-key map [mode-line down-mouse-3] #'agent-shell-attention-open-menu)
+    map)
+  "Keymap used to make the mode-line indicator clickable.")
+
+(defun agent-shell-attention-render-default (count _entries)
+  "Default value for `agent-shell-attention-render-function' using COUNT."
+  (if (or (null agent-shell-attention-lighter)
+          (zerop count))
+      ""
+    (let ((label (format agent-shell-attention-lighter count)))
+      (propertize label
+                  'mouse-face 'mode-line-highlight
+                  'help-echo "mouse-1: list agent-shell buffers awaiting reply"
+                  'local-map agent-shell-attention--mode-line-map))))
+
+;;; Agent-shell integration
+
+(defun agent-shell-attention--ensure-mode-line-entry ()
+  "Ensure our indicator is present in both current and default mode line."
+  (agent-shell-attention--apply-indicator-location))
+
+(defun agent-shell-attention--mark-buffer (buffer label)
+  "Mark BUFFER as waiting for user input with LABEL description."
+  (when (and (buffer-live-p buffer)
+             (agent-shell-attention--should-notify-buffer buffer))
+    (unless (gethash buffer agent-shell-attention--pending)
+      (with-current-buffer buffer
+        (add-hook 'kill-buffer-hook
+                  #'agent-shell-attention--on-buffer-killed nil t)))
+    (puthash buffer (cons label (float-time)) agent-shell-attention--pending)
+    (agent-shell-attention--ensure-mode-line-entry)
+    (force-mode-line-update t)))
+
+(defun agent-shell-attention--handle-success (buffer response)
+  "Process successful agent RESPONSE for BUFFER."
+  (let* ((stop-reason (map-elt response 'stopReason))
+         (description (agent-shell-attention--describe-stop stop-reason)))
+    (when (agent-shell-attention--should-notify-buffer buffer)
+      (agent-shell-attention--message buffer description)
+      (when (agent-shell-attention--awaiting-p stop-reason)
+        (agent-shell-attention--mark-buffer buffer description)))))
+
+(defun agent-shell-attention--handle-failure (buffer error raw-message)
+  "Handle agent failure for BUFFER using ERROR and RAW-MESSAGE."
+  (let ((details (or (agent-shell-attention--extract-message error)
+                     (agent-shell-attention--extract-message raw-message)
+                     "Request failed")))
+    (agent-shell-attention--message buffer details)))
+
+(defun agent-shell-attention--request-label (request)
+  "Return descriptive label for REQUEST when it needs user input."
+  (pcase (map-elt request 'method)
+    ("session/request_permission"
+     (let* ((tool-call (ignore-errors
+                         (map-nested-elt request '(params toolCall))))
+            (title (or (and tool-call (map-elt tool-call 'title))
+                       "Permission required"))
+            (kind (and tool-call (map-elt tool-call 'kind))))
+       (concat "Permission: " title
+               (if kind (format " (%s)" kind) ""))))
+    (_ nil)))
+
+(defun agent-shell-attention--handle-request (state request)
+  "Record that REQUEST in STATE is awaiting a user response."
+  (when-let* ((buffer (map-elt state :buffer))
+              (label (agent-shell-attention--request-label request)))
+    (when (agent-shell-attention--should-notify-buffer buffer)
+      (agent-shell-attention--message buffer label)
+      (agent-shell-attention--mark-buffer buffer label))))
+
+(defun agent-shell-attention--decorate-request (buffer request-args)
+  "Wrap REQUEST-ARGS with our completion hooks for BUFFER."
+  (let* ((on-success (plist-get request-args :on-success))
+         (on-failure (plist-get request-args :on-failure)))
+    (setq request-args
+          (plist-put request-args :on-success
+                     (lambda (response)
+                       (agent-shell-attention--handle-success buffer response)
+                       (when on-success
+                         (funcall on-success response)))))
+    (setq request-args
+          (plist-put request-args :on-failure
+                     (lambda (error raw-message)
+                       (agent-shell-attention--handle-failure
+                        buffer error raw-message)
+                       (when on-failure
+                         (funcall on-failure error raw-message)))))
+    request-args))
+
+(defun agent-shell-attention--around-send-command (orig-fn &rest args)
+  "Advice around `agent-shell--send-command' ORIG-FN with ARGS.
+
+Intercept completions to track buffers awaiting user input."
+  (let ((shell (plist-get args :shell)))
+    (if (not (and shell (map-elt shell :buffer)))
+        (apply orig-fn args)
+      (let ((buffer (map-elt shell :buffer)))
+        (agent-shell-attention--clear-buffer buffer)
+        (cl-letf* ((orig-request (symbol-function #'acp-send-request))
+                   ((symbol-function #'acp-send-request)
+                    (lambda (&rest request-args)
+                      (apply orig-request
+                             (agent-shell-attention--decorate-request
+                              buffer
+                              request-args)))))
+          (apply orig-fn args))))))
+
+(defun agent-shell-attention--around-on-request (orig-fn &rest args)
+  "Advice around `agent-shell--on-request' ORIG-FN with ARGS.
+
+Catch permission prompts and mark buffers awaiting input."
+  (let ((state (plist-get args :state))
+        (request (plist-get args :request)))
+    (when (and state request)
+      (agent-shell-attention--handle-request state request))
+    (apply orig-fn args)))
+
+;;; Minor mode
+
+(defun agent-shell-attention--enable ()
+  "Enable hooks and mode-line integration."
+  (require 'agent-shell)
+  (agent-shell-attention--ensure-mode-line-entry)
+  (add-hook 'buffer-list-update-hook
+            #'agent-shell-attention--maybe-clear-current)
+  (advice-add #'agent-shell--send-command :around
+              #'agent-shell-attention--around-send-command)
+  (advice-add #'agent-shell--on-request :around
+              #'agent-shell-attention--around-on-request)
+  (force-mode-line-update t))
+
+(defun agent-shell-attention--disable ()
+  "Disable hooks and clear all pending markers."
+  ;; Remove from both possible locations.
+  (let ((indicator agent-shell-attention--mode-line))
+    (setq mode-line-misc-info (delq indicator mode-line-misc-info))
+    (setq global-mode-string (delq indicator global-mode-string))
+    (setq-default mode-line-misc-info
+                  (delq indicator (default-value 'mode-line-misc-info)))
+    (setq-default global-mode-string
+                  (delq indicator (default-value 'global-mode-string))))
+  (remove-hook 'buffer-list-update-hook
+               #'agent-shell-attention--maybe-clear-current)
+  (advice-remove #'agent-shell--send-command
+                 #'agent-shell-attention--around-send-command)
+  (advice-remove #'agent-shell--on-request
+                 #'agent-shell-attention--around-on-request)
+  (maphash (lambda (buffer _)
+             (with-current-buffer buffer
+               (remove-hook 'kill-buffer-hook
+                            #'agent-shell-attention--on-buffer-killed t)))
+           agent-shell-attention--pending)
+  (clrhash agent-shell-attention--pending)
+  (force-mode-line-update t))
+
+(defvar agent-shell-attention-mode-map
+  (let ((map (make-sparse-keymap)))
+    map)
+  "Keymap used while `agent-shell-attention-mode' is active.")
+
+;;;###autoload
+(define-minor-mode agent-shell-attention-mode
+  "Global notifications for agent-shell buffers.
+When enabled, display a tally of agent shells needing user input and
+emit minibuffer notifications whenever an agent hands back control."
+  :global t
+  :lighter nil
+  :keymap agent-shell-attention-mode-map
+  (if agent-shell-attention-mode
+      (agent-shell-attention--enable)
+    (agent-shell-attention--disable)))
+
+(provide 'agent-shell-attention)
+
+;;; agent-shell-attention.el ends here

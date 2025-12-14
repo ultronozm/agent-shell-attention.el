@@ -1,0 +1,105 @@
+#+title: agent-shell-attention: Mode-line attention tracker for agent-shell
+
+Small add-on for [[https://github.com/xenodium/agent-shell][agent-shell]] that keeps track of which agent buffers are waiting for your input and shows a compact indicator in the mode line.
+
+* Usage
+
+Enable the global minor mode:
+
+#+begin_src emacs-lisp
+(require 'agent-shell-attention)
+(agent-shell-attention-mode 1)
+#+end_src
+
+When one or more agent buffers need attention, an =AS:n= indicator appears in the mode line.
+
+- Click =AS:n= to pick a pending agent buffer from a menu.
+- Use =M-x agent-shell-attention-jump= to jump to a pending buffer from the keyboard.
+  - Without a prefix argument, it jumps to the oldest pending buffer.
+  - With =C-u=, it prompts with completion.
+
+To bind the jump command when the minor mode is active:
+
+#+begin_src emacs-lisp
+(keymap-set agent-shell-attention-mode-map "C-z a" #'agent-shell-attention-jump)
+#+end_src
+
+To have the indicator appear even when *no* agents need attention, as =AS:0=:
+
+#+begin_src emacs-lisp
+(setopt agent-shell-attention-render-function
+        (lambda (count _entries)
+          (format " AS:%d" count)))
+#+end_src
+
+* Notifications
+
+=agent-shell-attention= always echoes a short message when an agent finishes a turn or asks for permission.
+
+To also show external notifications, set =agent-shell-attention-notify-function=.
+
+Built-in desktop notifications (via =notifications-notify=):
+
+#+begin_src emacs-lisp
+(setopt agent-shell-attention-notify-function #'agent-shell-attention-notify-default)
+#+end_src
+
+KnockKnock notifications (see [[https://github.com/konrad1977/knockknock][knockknock]]):
+
+#+begin_src emacs-lisp
+(require 'knockknock)
+(setopt agent-shell-attention-notify-function
+        (lambda (_buffer title body)
+          (knockknock-notify
+           :title title
+           :message body
+           :icon "nf-cod-bot"
+           :duration 5)))
+#+end_src
+
+* Customization
+
+=M-x customize-group RET agent-shell-attention RET=.
+
+- Change the mode-line text with =agent-shell-attention-lighter=.
+- Choose where the indicator is installed with =agent-shell-attention-indicator-location=.  Set it to =mode-line-misc-info= (default) to sit next to other minor-mode indicators, or to =global-mode-string= if you prefer it near clock/battery status:
+
+#+begin_src emacs-lisp
+(setopt agent-shell-attention-indicator-location 'global-mode-string)
+#+end_src
+
+  If you want the indicator to show in the tab bar, make sure =tab-bar-format= includes =tab-bar-format-global= (the piece that mirrors =global-mode-string= up there).  For instance:
+
+#+begin_src emacs-lisp
+(add-to-list 'tab-bar-format #'tab-bar-format-global t)
+#+end_src
+
+  Prefer to add only this indicator instead of the whole =global-mode-string=?  Add the built-in helper =agent-shell-attention-tab-bar-format=:
+
+#+begin_src emacs-lisp
+(add-to-list 'tab-bar-format #'agent-shell-attention-tab-bar-format t)
+#+end_src
+
+- If you want different window/tab display behavior for =agent-shell-attention-jump=, customize =agent-shell-attention-display-buffer-action=.
+
+* Example configuration
+
+Here is a complete example using =elpaca= (replace the repo with your fork/location):
+
+#+begin_src emacs-lisp
+(elpaca (agent-shell-attention :repo "YOURNAME/agent-shell-attention")
+  (require 'agent-shell-attention)
+
+  (keymap-set agent-shell-attention-mode-map "C-z a" #'agent-shell-attention-jump)
+
+  (require 'knockknock)
+  (setopt agent-shell-attention-notify-function
+          (lambda (_buffer title body)
+            (knockknock-notify
+             :title title
+             :message body
+             :icon "nf-cod-bot"
+             :duration 5)))
+
+  (agent-shell-attention-mode 1))
+#+end_src
