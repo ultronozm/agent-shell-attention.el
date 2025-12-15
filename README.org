@@ -41,8 +41,6 @@ To show an indicator even when nothing is pending (for example, =AS:0= or =AS:0/
 (setopt agent-shell-attention-show-zeros t)
 #+end_src
 
-With =agent-shell-attention-render-active=, keep the active lighter as ~" AS:%d/%d"~ if you prefer =AS:0/0= when idle.
-
 * Notifications
 
 =agent-shell-attention= always echoes a short message when an agent finishes a turn or asks for permission.
