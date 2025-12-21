@@ -94,6 +94,22 @@ The helper `agent-shell-attention-notify-default' uses
 
 ;;; Display-buffer
 
+(defun agent-shell-attention--window-state-has-buffer (state buffer)
+  "Return non-nil when window-state STATE shows BUFFER."
+  (when (and state (fboundp 'window-state-buffers))
+    (condition-case nil
+        (let ((buffers (window-state-buffers state)))
+          (and buffers
+               (or (memq buffer buffers)
+                   (member (buffer-name buffer) buffers))))
+      (error nil))))
+
+(defun agent-shell-attention--tab-displays-buffer-p (tab buffer)
+  "Return non-nil when TAB's window state shows BUFFER."
+  (let ((state (alist-get 'ws tab)))
+    (and state
+         (agent-shell-attention--window-state-has-buffer state buffer))))
+
 (defun agent-shell-attention-display-buffer-across-tabs (buffer _alist)
   "Display BUFFER by reusing an existing window across tabs in this frame.
 
@@ -110,23 +126,22 @@ of the current frame, switch to that tab and reuse its window."
            (current-index (or (and current
                                    (cl-position current tabs :test #'equal))
                               0))
-           (current-tab-number (1+ current-index))
-           (target-window nil)
-           (found nil))
-      (let ((inhibit-redisplay t))
-        (unwind-protect
-            (progn
-              (cl-loop for i from 0 below (length tabs)
-                       while (not found)
-                       do (unless (= i current-index)
-                            (tab-bar-select-tab (1+ i))
-                            (setq target-window
-                                  (get-buffer-window buffer frame))
-                            (when (window-live-p target-window)
-                              (setq found t))))
-              (when found target-window))
-          (unless found
-            (ignore-errors (tab-bar-select-tab current-tab-number))))))))
+           (target-index (cl-position-if
+                          (lambda (tab)
+                            (agent-shell-attention--tab-displays-buffer-p
+                             tab buffer))
+                          tabs))
+           (target-window nil))
+      (when (numberp target-index)
+        (cond
+         ((= target-index current-index)
+          (setq target-window (get-buffer-window buffer frame)))
+         (t
+          (let ((inhibit-redisplay t))
+            (tab-bar-select-tab (1+ target-index))
+            (setq target-window (get-buffer-window buffer frame)))))
+        (when (window-live-p target-window)
+          target-window)))))
 
 (defcustom agent-shell-attention-display-buffer-action
   '((display-buffer-reuse-window

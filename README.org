@@ -91,6 +91,7 @@ KnockKnock notifications (see [[https://github.com/konrad1977/knockknock][knockk
 #+end_src
 
 - If you want different window/tab display behavior for =agent-shell-attention-jump=, customize =agent-shell-attention-display-buffer-action=.
+  By default, the jump command will switch tabs if the agent buffer is already visible in another tab.  After jumping, you can return to your previous tab with =M-x tab-recent=.
 
 * Example configuration
 
