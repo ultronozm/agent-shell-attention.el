@@ -120,7 +120,11 @@ of the current frame, switch to that tab and reuse its window."
              (fboundp 'tab-bar-tabs)
              (fboundp 'tab-bar-select-tab))
     (let* ((frame (selected-frame))
-           (tabs (tab-bar-tabs))
+           (tabs (condition-case nil
+                     (tab-bar-tabs frame)
+                   (wrong-number-of-arguments
+                    (tab-bar-tabs))
+                   (error nil)))
            (current (when (fboundp 'tab-bar--current-tab)
                       (tab-bar--current-tab)))
            (current-index (or (and current
@@ -137,9 +141,12 @@ of the current frame, switch to that tab and reuse its window."
          ((= target-index current-index)
           (setq target-window (get-buffer-window buffer frame)))
          (t
-          (let ((inhibit-redisplay t))
-            (tab-bar-select-tab (1+ target-index))
-            (setq target-window (get-buffer-window buffer frame)))))
+          (condition-case nil
+              (let ((inhibit-redisplay t))
+                (tab-bar-select-tab (1+ target-index))
+                (setq target-window (get-buffer-window buffer frame)))
+            (error
+             (setq target-window nil)))))
         (when (window-live-p target-window)
           target-window)))))
 
@@ -190,6 +197,13 @@ Used by `agent-shell-attention-render-active'."
   "When non-nil, show the indicator even when counts are zero.
 Applies to both pending-only and pending+active renderers."
   :type 'boolean)
+
+(defun agent-shell-attention--mode-line-list (value)
+  "Return VALUE as a list suitable for mode-line variables."
+  (cond
+   ((null value) nil)
+   ((listp value) value)
+   (t (list value))))
 
 (defun agent-shell-attention--call-renderer (pending-count active-count)
   "Call `agent-shell-attention-render-function' safely.
@@ -243,6 +257,16 @@ When set to `mode-line-misc-info', the indicator lives in
 (defun agent-shell-attention--apply-indicator-location ()
   "Apply `agent-shell-attention-indicator-location' to the mode line."
   (let ((indicator agent-shell-attention--mode-line))
+    (setq mode-line-misc-info
+          (agent-shell-attention--mode-line-list mode-line-misc-info))
+    (setq global-mode-string
+          (agent-shell-attention--mode-line-list global-mode-string))
+    (setq-default mode-line-misc-info
+                  (agent-shell-attention--mode-line-list
+                   (default-value 'mode-line-misc-info)))
+    (setq-default global-mode-string
+                  (agent-shell-attention--mode-line-list
+                   (default-value 'global-mode-string)))
     ;; Remove from both lists first to avoid duplicates.
     (setq mode-line-misc-info (delq indicator mode-line-misc-info))
     (setq global-mode-string (delq indicator global-mode-string))
@@ -368,12 +392,11 @@ This call also purges stale entries for dead buffers."
 
 (defun agent-shell-attention--message (buffer text)
   "Display TEXT as a minibuffer notification for BUFFER."
-  (when (agent-shell-attention--should-notify-buffer buffer)
-    (let ((title (format "%s agent" (buffer-name buffer))))
-      (message "%s %s: %s"
-               agent-shell-attention-message-prefix
-               (buffer-name buffer)
-               text)
+  (when (and (buffer-live-p buffer)
+             (agent-shell-attention--should-notify-buffer buffer))
+    (let* ((name (buffer-name buffer))
+           (title (format "%s agent" name)))
+      (message "%s %s: %s" agent-shell-attention-message-prefix name text)
       (agent-shell-attention--maybe-notify buffer title text))))
 
 (defun agent-shell-attention--on-buffer-killed ()
@@ -579,12 +602,14 @@ ACTIVE-COUNT is accepted for API compatibility but ignored."
           (when state
             (let ((tool-calls (map-elt state :tool-calls)))
               (when tool-calls
-                (catch 'pending
-                  (map-do (lambda (_tool-call-id tool-call)
-                            (when (agent-shell-attention--tool-call-awaits-permission-p tool-call)
-                              (throw 'pending t)))
-                          tool-calls)
-                  nil)))))))))
+                (condition-case nil
+                    (catch 'pending
+                      (map-do (lambda (_tool-call-id tool-call)
+                                (when (agent-shell-attention--tool-call-awaits-permission-p tool-call)
+                                  (throw 'pending t)))
+                              tool-calls)
+                      nil)
+                  (error nil))))))))))
 
 (cl-defun agent-shell-attention--mark-buffer (buffer label &key force)
   "Mark BUFFER as waiting for user input with LABEL description.
@@ -728,6 +753,16 @@ ARGS are provided by `agent-shell--send-permission-response'."
   "Disable hooks and clear all pending/busy markers."
   ;; Remove from both possible locations.
   (let ((indicator agent-shell-attention--mode-line))
+    (setq mode-line-misc-info
+          (agent-shell-attention--mode-line-list mode-line-misc-info))
+    (setq global-mode-string
+          (agent-shell-attention--mode-line-list global-mode-string))
+    (setq-default mode-line-misc-info
+                  (agent-shell-attention--mode-line-list
+                   (default-value 'mode-line-misc-info)))
+    (setq-default global-mode-string
+                  (agent-shell-attention--mode-line-list
+                   (default-value 'global-mode-string)))
     (setq mode-line-misc-info (delq indicator mode-line-misc-info))
     (setq global-mode-string (delq indicator global-mode-string))
     (setq-default mode-line-misc-info
