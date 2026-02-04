@@ -198,6 +198,14 @@ Used by `agent-shell-attention-render-active'."
 Applies to both pending-only and pending+active renderers."
   :type 'boolean)
 
+(defcustom agent-shell-attention-jump-show-groups nil
+  "When non-nil, group prefix-arg jump candidates by status.
+
+Grouping relies on completion UIs honoring completion metadata
+`group-function'.  When nil, candidates are still ordered with pending
+buffers first and are annotated with status tags."
+  :type 'boolean)
+
 (defun agent-shell-attention--mode-line-list (value)
   "Return VALUE as a list suitable for mode-line variables."
   (cond
@@ -448,23 +456,107 @@ This call also purges stale entries for dead buffers."
   (< (agent-shell-attention--pending-entry-timestamp (cdr entry-a))
      (agent-shell-attention--pending-entry-timestamp (cdr entry-b))))
 
-(defun agent-shell-attention--unique-candidates (entries)
-  "Return an alist of (DISPLAY . BUFFER) built from ENTRIES.
+(defun agent-shell-attention--active-entry-records ()
+  "Return ordered candidate records for active agent-shell buffers.
 
-ENTRIES is an alist of (BUFFER . ENTRY).  DISPLAY strings are made
+Each record is a list (BUFFER ENTRY STATUS), where STATUS is either
+`pending' (awaiting user response) or `busy' (in-flight request)."
+  (let* ((pending (copy-sequence (agent-shell-attention--pending-live-entries)))
+         (pending-sorted (sort pending #'agent-shell-attention--entry-older-p))
+         (busy-only (cl-remove-if
+                     (lambda (buffer)
+                       (gethash buffer agent-shell-attention--pending))
+                     (agent-shell-attention--busy-live-buffers)))
+         (busy-sorted (sort busy-only
+                            (lambda (a b)
+                              (string-lessp (buffer-name a) (buffer-name b)))))
+         (records nil))
+    (dolist (entry pending-sorted)
+      (push (list (car entry) (cdr entry) 'pending) records))
+    (dolist (buffer busy-sorted)
+      (push (list buffer nil 'busy) records))
+    (nreverse records)))
+
+(defun agent-shell-attention--unique-candidates-with-status (records)
+  "Return an alist of (DISPLAY . (BUFFER . STATUS)) built from RECORDS.
+
+RECORDS is a list of (BUFFER ENTRY STATUS).  DISPLAY strings are made
 unique if multiple entries would otherwise collide."
   (let ((seen (make-hash-table :test #'equal))
         (candidates nil))
-    (dolist (entry entries)
-      (let* ((buffer (car entry))
-             (label (agent-shell-attention--entry-label buffer (cdr entry)))
-             (count (gethash label seen 0))
-             (unique (if (zerop count)
-                         label
-                       (format "%s <%d>" label (1+ count)))))
-        (puthash label (1+ count) seen)
-        (push (cons unique buffer) candidates)))
+    (dolist (record records)
+      (pcase-let ((`(,buffer ,entry ,status) record))
+        (let* ((label (pcase status
+                        ('busy (buffer-name buffer))
+                        (_ (agent-shell-attention--entry-label buffer entry))))
+               (count (gethash label seen 0))
+               (unique (if (zerop count)
+                           label
+                         (format "%s <%d>" label (1+ count)))))
+          (puthash label (1+ count) seen)
+          (push (cons unique (cons buffer status)) candidates))))
     (nreverse candidates)))
+
+(defun agent-shell-attention--completion-tag (status)
+  "Return a visually distinguished completion tag for STATUS."
+  (pcase status
+    ('pending (propertize "awaiting" 'face 'success))
+    ('busy (propertize "busy" 'face 'shadow))
+    (_ (propertize "active" 'face 'shadow))))
+
+(defun agent-shell-attention--completion-annotation (display status-table)
+  "Return completion annotation string for DISPLAY using STATUS-TABLE."
+  (let ((status (gethash display status-table)))
+    (concat " [" (agent-shell-attention--completion-tag status) "]")))
+
+(defun agent-shell-attention--completion-table (candidates)
+  "Return completion table for CANDIDATES with ordering and annotations.
+
+CANDIDATES is an alist of (DISPLAY . (BUFFER . STATUS))."
+  (let* ((displays (mapcar #'car candidates))
+         (order (let ((table (make-hash-table :test #'equal))
+                      (index 0))
+                  (dolist (display displays)
+                    (puthash display index table)
+                    (setq index (1+ index)))
+                  table))
+         (status-table (let ((table (make-hash-table :test #'equal)))
+                          (dolist (candidate candidates)
+                            (puthash (car candidate) (cddr candidate) table))
+                          table))
+         (annotation (lambda (display)
+                       (agent-shell-attention--completion-annotation display status-table)))
+         (affixation (lambda (completions)
+                       (mapcar (lambda (completion)
+                                 (let* ((display completion))
+                                   (list display ""
+                                         (agent-shell-attention--completion-annotation
+                                          display status-table))))
+                               completions)))
+         (group (lambda (display transform)
+                  (if transform
+                      display
+                    (pcase (gethash display status-table)
+                      ('pending "Awaiting response")
+                      ('busy "Busy")
+                      (_ "Active")))))
+         (sorter (lambda (completions)
+                   (sort (copy-sequence completions)
+                         (lambda (a b)
+                           (let* ((ia (gethash a order most-positive-fixnum))
+                                  (ib (gethash b order most-positive-fixnum)))
+                             (if (/= ia ib)
+                                 (< ia ib)
+                               (string-lessp a b))))))))
+    (completion-table-with-metadata
+     displays
+     (append
+      `((category . agent-shell-attention)
+        (display-sort-function . ,sorter)
+        (annotation-function . ,annotation)
+        (affixation-function . ,affixation))
+      (when agent-shell-attention-jump-show-groups
+        `((group-function . ,group)))))))
 
 (defun agent-shell-attention--jump-to-buffer (buffer)
   "Switch to BUFFER, clearing pending state when appropriate."
@@ -489,22 +581,28 @@ ENTRIES is an alist of (BUFFER . ENTRY)."
 (defun agent-shell-attention-jump (&optional prompt)
   "Jump to an agent-shell buffer awaiting your response.
 
-With PROMPT (prefix argument), select the target buffer using
-`completing-read'.  Without it, jump to the oldest pending buffer."
+With PROMPT (prefix argument), use `completing-read' to select from all
+active agent-shell buffers, ordered with pending buffers first and
+busy buffers after.
+
+Without PROMPT, jump to the oldest pending buffer."
   (interactive "P")
-  (let* ((entries (copy-sequence (agent-shell-attention--pending-live-entries)))
-         (sorted (sort entries #'agent-shell-attention--entry-older-p)))
-    (cond
-     ((null sorted)
-      (message "No agent-shell buffers awaiting replies"))
-     (prompt
-      (let* ((candidates (agent-shell-attention--unique-candidates sorted))
-             (choice (completing-read "Agent shell: " candidates nil t))
-             (buffer (cdr (assoc choice candidates))))
-        (when (buffer-live-p buffer)
-          (agent-shell-attention--jump-to-buffer buffer))))
-     (t
-      (agent-shell-attention--jump-to-buffer (caar sorted))))))
+  (if prompt
+      (let* ((records (agent-shell-attention--active-entry-records)))
+        (if (null records)
+            (message "No active agent-shell buffers")
+          (let* ((candidates (agent-shell-attention--unique-candidates-with-status records))
+                 (table (agent-shell-attention--completion-table candidates))
+                 (choice (completing-read "Agent shell: " table nil t))
+                 (entry (assoc choice candidates))
+                 (buffer (and entry (cadr entry))))
+            (when (buffer-live-p buffer)
+              (agent-shell-attention--jump-to-buffer buffer)))))
+    (let* ((entries (copy-sequence (agent-shell-attention--pending-live-entries)))
+           (sorted (sort entries #'agent-shell-attention--entry-older-p)))
+      (if (null sorted)
+          (message "No agent-shell buffers awaiting replies")
+        (agent-shell-attention--jump-to-buffer (caar sorted))))))
 
 (defun agent-shell-attention-open-menu (&optional event)
   "Show pending agent-shell buffers in a popup menu.

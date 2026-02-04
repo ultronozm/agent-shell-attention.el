@@ -72,6 +72,78 @@
                (lambda (_idx) (error "boom"))))
       (should-not (agent-shell-attention-display-buffer-across-tabs (current-buffer) nil)))))
 
+(ert-deftest agent-shell-attention--active-entry-records-pending-first ()
+  (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
+        (agent-shell-attention--busy (make-hash-table :test #'eq))
+        (pending-buf (generate-new-buffer " *asa-pending*"))
+        (busy-buf (generate-new-buffer " *asa-busy*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer pending-buf (agent-shell-mode))
+          (with-current-buffer busy-buf (agent-shell-mode))
+          (puthash pending-buf (cons "Need reply" 1.0) agent-shell-attention--pending)
+          (puthash busy-buf 1 agent-shell-attention--busy)
+          (let ((records (agent-shell-attention--active-entry-records)))
+            (should (= (length records) 2))
+            (should (eq (nth 0 (nth 0 records)) pending-buf))
+            (should (eq (nth 2 (nth 0 records)) 'pending))
+            (should (eq (nth 0 (nth 1 records)) busy-buf))
+            (should-not (nth 1 (nth 1 records)))
+            (should (eq (nth 2 (nth 1 records)) 'busy))))
+      (when (buffer-live-p pending-buf) (kill-buffer pending-buf))
+      (when (buffer-live-p busy-buf) (kill-buffer busy-buf)))))
+
+(ert-deftest agent-shell-attention--completion-table-metadata-and-ordering ()
+  (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
+        (agent-shell-attention--busy (make-hash-table :test #'eq))
+        (agent-shell-attention-jump-show-groups nil)
+        (pending-buf (generate-new-buffer " *asa-pending*"))
+        (busy-buf (generate-new-buffer " *asa-busy*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer pending-buf (agent-shell-mode))
+          (with-current-buffer busy-buf (agent-shell-mode))
+          ;; Mark the same buffer both pending and busy; it should only appear once.
+          (puthash pending-buf (cons "Need reply" 1.0) agent-shell-attention--pending)
+          (puthash pending-buf 1 agent-shell-attention--busy)
+          (puthash busy-buf 1 agent-shell-attention--busy)
+          (let* ((records (agent-shell-attention--active-entry-records))
+                 (candidates (agent-shell-attention--unique-candidates-with-status records))
+                 (table (agent-shell-attention--completion-table candidates))
+                 (meta (funcall table "" nil 'metadata))
+                 (sort-fn (cdr (assq 'display-sort-function (cdr meta)))))
+            (should (equal (car meta) 'metadata))
+            (should (functionp sort-fn))
+            (should (assq 'affixation-function (cdr meta)))
+            (should (assq 'annotation-function (cdr meta)))
+            (let ((all (funcall table "" nil t)))
+              (should (= (length all) 2))
+              ;; Pending should come before busy-only, even if the input list is reversed.
+              (let ((sorted (funcall sort-fn (reverse all))))
+                (should (string-match-p "Need reply" (car sorted)))))))
+      (when (buffer-live-p pending-buf) (kill-buffer pending-buf))
+      (when (buffer-live-p busy-buf) (kill-buffer busy-buf)))))
+
+(ert-deftest agent-shell-attention--completion-table-group-function-protocol ()
+  (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
+        (agent-shell-attention--busy (make-hash-table :test #'eq))
+        (agent-shell-attention-jump-show-groups t)
+        (pending-buf (generate-new-buffer " *asa-pending*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer pending-buf (agent-shell-mode))
+          (puthash pending-buf (cons "Need reply" 1.0) agent-shell-attention--pending)
+          (let* ((records (agent-shell-attention--active-entry-records))
+                 (candidates (agent-shell-attention--unique-candidates-with-status records))
+                 (table (agent-shell-attention--completion-table candidates))
+                 (meta (funcall table "" nil 'metadata))
+                 (group-fn (cdr (assq 'group-function (cdr meta))))
+                 (display (caar candidates)))
+            (should (functionp group-fn))
+            (should (stringp (funcall group-fn display nil)))
+            (should (equal (funcall group-fn display t) display))))
+      (when (buffer-live-p pending-buf) (kill-buffer pending-buf)))))
+
 (provide 'agent-shell-attention-test)
 
 ;;; agent-shell-attention-test.el ends here
