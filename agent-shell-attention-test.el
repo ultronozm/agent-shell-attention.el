@@ -144,6 +144,46 @@
             (should (equal (funcall group-fn display t) display))))
       (when (buffer-live-p pending-buf) (kill-buffer pending-buf)))))
 
+(ert-deftest agent-shell-attention--around-send-command-supports-shell-buffer ()
+  (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
+        (agent-shell-attention--busy (make-hash-table :test #'eq))
+        (buffer (generate-new-buffer " *asa-send*"))
+        (seen-buffer nil)
+        (send-called nil)
+        (request-decorated nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (agent-shell-mode))
+          (cl-letf (((symbol-function 'agent-shell-attention--clear-buffer)
+                     (lambda (_buffer) nil))
+                    ((symbol-function 'agent-shell-attention--mark-busy)
+                     (lambda (buf)
+                       (setq seen-buffer buf)))
+                    ((symbol-function 'agent-shell-attention--clear-busy)
+                     (lambda (_buffer) nil))
+                    ((symbol-function 'agent-shell-attention--decorate-request)
+                     (lambda (_buffer request-args)
+                       (setq request-decorated t)
+                       request-args))
+                    ((symbol-function 'acp-send-request)
+                     (lambda (&rest _request-args)
+                       'acp-ok))
+                    ((symbol-function 'fake-orig)
+                     (lambda (&rest _args)
+                       (setq send-called t)
+                       (acp-send-request :request 'dummy)
+                       'orig-ok)))
+            (should
+             (eq (agent-shell-attention--around-send-command
+                  #'fake-orig :prompt "hello" :shell-buffer buffer)
+                 'orig-ok))
+            (should send-called)
+            (should (eq seen-buffer buffer))
+            (should request-decorated)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (provide 'agent-shell-attention-test)
 
 ;;; agent-shell-attention-test.el ends here

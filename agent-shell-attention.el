@@ -791,24 +791,26 @@ When FORCE is non-nil, mark the buffer even if it's currently selected."
   "Advice around `agent-shell--send-command' ORIG-FN with ARGS.
 
 Intercept completions to track buffers awaiting user input."
-  (let ((shell (plist-get args :shell)))
-    (if (not (and shell (map-elt shell :buffer)))
+  (let* ((shell (plist-get args :shell))
+         (buffer (or (and shell (map-elt shell :buffer))
+                     (let ((shell-buffer (plist-get args :shell-buffer)))
+                       (and (bufferp shell-buffer) shell-buffer)))))
+    (if (not (buffer-live-p buffer))
         (apply orig-fn args)
-      (let ((buffer (map-elt shell :buffer)))
-        (agent-shell-attention--clear-buffer buffer)
-        (agent-shell-attention--mark-busy buffer)
-        (condition-case err
-            (cl-letf* ((orig-request (symbol-function #'acp-send-request))
-                       ((symbol-function #'acp-send-request)
-                        (lambda (&rest request-args)
-                          (apply orig-request
-                                 (agent-shell-attention--decorate-request
-                                  buffer
-                                  request-args)))))
-              (apply orig-fn args))
-          (error
-           (agent-shell-attention--clear-busy buffer)
-           (signal (car err) (cdr err))))))))
+      (agent-shell-attention--clear-buffer buffer)
+      (agent-shell-attention--mark-busy buffer)
+      (condition-case err
+          (cl-letf* ((orig-request (symbol-function #'acp-send-request))
+                     ((symbol-function #'acp-send-request)
+                      (lambda (&rest request-args)
+                        (apply orig-request
+                               (agent-shell-attention--decorate-request
+                                buffer
+                                request-args)))))
+            (apply orig-fn args))
+        (error
+         (agent-shell-attention--clear-busy buffer)
+         (signal (car err) (cdr err)))))))
 
 (defun agent-shell-attention--around-on-request (orig-fn &rest args)
   "Advice around `agent-shell--on-request' ORIG-FN with ARGS.
