@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025  Paul D. Nelson
 
 ;; Author: Paul D. Nelson <ultrono@gmail.com>
-;; Version: 0.0.0
+;; Version: 0.0.1
 ;; URL: https://github.com/ultronozm/agent-shell-attention.el
 ;; Package-Requires: ((emacs "29.1") (agent-shell "0.24.2"))
 ;; Keywords: convenience
