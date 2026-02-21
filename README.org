@@ -16,8 +16,8 @@ When one or more agent buffers need attention, an =AS:n= indicator appears in th
 - Click the indicator to pick a pending agent buffer from a menu.
 - =M-x agent-shell-attention-jump=:
   - Without a prefix argument, jump to the oldest pending buffer.
-  - With =C-u=, prompt with completion from all active agent-shell buffers (awaiting or busy), with status annotations.
-  - With =C-u C-u=, open a heads-up dashboard for all live =agent-shell= buffers, sorted by status (awaiting, running, then idle), with last-active timestamps and status text (=Idle=, =Awaiting=, =Running=, or =Permissions: (...)=).  The dashboard refreshes automatically on agent-shell state changes.  You can also call =M-x agent-shell-attention-dashboard= directly.
+  - With =C-u=, prompt with completion from all active agent-shell buffers (awaiting or busy)
+  - With =C-u C-u=, open a dashboard for all live =agent-shell= buffers, sorted by status (awaiting, running, idle), with last-active timestamps and status text (=Idle=, =Awaiting=, =Running=, or =Permissions: (...)=).  You can also call =M-x agent-shell-attention-dashboard= directly.
 
 "Awaiting reply" prompts clear when you visit the buffer, while "tool permission" prompts remain pending until you actually respond.
 
@@ -94,7 +94,6 @@ KnockKnock notifications (see [[https://github.com/konrad1977/knockknock][knockk
 - If you want different window/tab display behavior for =agent-shell-attention-jump=, customize =agent-shell-attention-display-buffer-action=.
 - If you want imenu-like group headings in =C-u M-x agent-shell-attention-jump= (some completion UIs support this), set =agent-shell-attention-jump-show-groups= to non-nil.
   By default, the jump command will switch tabs if the agent buffer is already visible in another tab.  After jumping, you can return to your previous tab with =M-x tab-recent=.
-- Dashboard formatting options are available via =M-x customize-group RET agent-shell-attention RET=.
 
 * Example configuration
 
