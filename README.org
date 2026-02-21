@@ -94,9 +94,7 @@ KnockKnock notifications (see [[https://github.com/konrad1977/knockknock][knockk
 - If you want different window/tab display behavior for =agent-shell-attention-jump=, customize =agent-shell-attention-display-buffer-action=.
 - If you want imenu-like group headings in =C-u M-x agent-shell-attention-jump= (some completion UIs support this), set =agent-shell-attention-jump-show-groups= to non-nil.
   By default, the jump command will switch tabs if the agent buffer is already visible in another tab.  After jumping, you can return to your previous tab with =M-x tab-recent=.
-- If permission status text in the dashboard is too long, tune =agent-shell-attention-dashboard-permission-detail-length= (set to 0 for plain =Permissions=).
-- If buffer names in the dashboard are too wide or too narrow, tune =agent-shell-attention-dashboard-buffer-column-width=.  Long names are left-truncated and right-aligned so the tail stays visible.
-- To control timestamp display in the dashboard, customize =agent-shell-attention-dashboard-time-format= (for example, full date-time with seconds).
+- Dashboard formatting options are available via =M-x customize-group RET agent-shell-attention RET=.
 
 * Example configuration
 

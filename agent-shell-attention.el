@@ -654,21 +654,6 @@ ENTRIES is an alist of (BUFFER . ENTRY)."
   (or (equal prefix '(16))
       (and (integerp prefix) (= prefix 16))))
 
-(defun agent-shell-attention--format-elapsed (timestamp)
-  "Return elapsed wall-clock time since TIMESTAMP as a short string."
-  (if (not (numberp timestamp))
-      "-"
-    (let* ((total (max 0 (truncate (- (float-time) timestamp))))
-           (days (/ total 86400))
-           (hours (% (/ total 3600) 24))
-           (mins (% (/ total 60) 60))
-           (secs (% total 60)))
-      (cond
-       ((> days 0) (format "%dd %02dh" days hours))
-       ((> hours 0) (format "%dh %02dm" hours mins))
-       ((> mins 0) (format "%dm %02ds" mins secs))
-       (t (format "%ds" secs))))))
-
 (defun agent-shell-attention--format-timestamp (timestamp)
   "Return TIMESTAMP as a formatted dashboard time string."
   (if (not (numberp timestamp))
@@ -687,12 +672,6 @@ ENTRIES is an alist of (BUFFER . ENTRY)."
             (<= (length clean) max-width))
         clean
       (concat (substring clean 0 (max 0 (- max-width 3))) "..."))))
-
-(defun agent-shell-attention--truncate-reason (text)
-  "Clamp TEXT to `agent-shell-attention-dashboard-max-reason-length'."
-  (agent-shell-attention--truncate-text
-   text
-   agent-shell-attention-dashboard-max-reason-length))
 
 (defun agent-shell-attention--permission-status-text (label)
   "Return dashboard status text for permission LABEL."
@@ -777,7 +756,9 @@ visible, then right-aligned by tabulated-list."
           :status status
           :rank (agent-shell-attention--dashboard-status-rank status)
           :activity-time activity-time
-          :status-text (agent-shell-attention--truncate-reason status-text))))
+          :status-text (agent-shell-attention--truncate-text
+                        status-text
+                        agent-shell-attention-dashboard-max-reason-length))))
 
 (defun agent-shell-attention--dashboard-record< (a b)
   "Return non-nil when dashboard record A should sort before B."
@@ -822,18 +803,12 @@ visible, then right-aligned by tabulated-list."
    (lambda (record)
      (let* ((buffer (plist-get record :buffer))
             (activity-time (plist-get record :activity-time))
-            (timestamp (agent-shell-attention--format-timestamp activity-time))
-            (elapsed (agent-shell-attention--format-elapsed activity-time))
-            (timestamp-cell (if (numberp activity-time)
-                                (propertize timestamp
-                                            'help-echo (format "Elapsed: %s ago"
-                                                               elapsed))
-                              timestamp)))
+            (timestamp (agent-shell-attention--format-timestamp activity-time)))
        (list buffer
              (vector
               (agent-shell-attention--dashboard-buffer-name
                (plist-get record :name))
-              timestamp-cell
+              timestamp
               (plist-get record :status-text)))))
    records))
 

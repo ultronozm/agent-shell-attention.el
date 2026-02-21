@@ -296,7 +296,7 @@
     (should (equal (agent-shell-attention--format-timestamp ts) expected))
     (should (equal (agent-shell-attention--format-timestamp nil) "-"))))
 
-(ert-deftest agent-shell-attention--dashboard-entry-time-help-echo ()
+(ert-deftest agent-shell-attention--dashboard-entry-time-cell ()
   (let* ((record (list :buffer (current-buffer)
                        :name "buf"
                        :activity-time 10.0
@@ -305,8 +305,7 @@
          (cols (cadr (car entries)))
          (timestamp (aref cols 1)))
     (should (stringp timestamp))
-    (should (stringp (get-text-property 0 'help-echo timestamp)))
-    (should (string-match-p "Elapsed:" (get-text-property 0 'help-echo timestamp)))))
+    (should-not (get-text-property 0 'help-echo timestamp))))
 
 (ert-deftest agent-shell-attention-dashboard-mode-buffer-column-customized ()
   (let ((agent-shell-attention-dashboard-buffer-column-width 24))
