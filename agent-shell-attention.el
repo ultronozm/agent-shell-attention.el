@@ -38,6 +38,8 @@
 (require 'cl-lib)
 (require 'easymenu)
 (require 'map)
+(require 'subr-x)
+(require 'tabulated-list)
 
 (declare-function notifications-notify "notifications")
 (declare-function agent-shell--on-request "agent-shell")
@@ -169,6 +171,13 @@ frame."
   "Table of `agent-shell-mode' buffers with in-flight requests.
 Values are integer reference counts.")
 
+(defvar agent-shell-attention--busy-since (make-hash-table :test #'eq)
+  "Table of when each buffer entered busy state.")
+
+(defvar agent-shell-attention--last-event (make-hash-table :test #'eq)
+  "Table of last known activity for agent-shell buffers.
+Values are plists with keys :status, :summary, and :timestamp.")
+
 ;;; Mode-line
 
 (defcustom agent-shell-attention-render-function
@@ -205,6 +214,31 @@ Grouping relies on completion UIs honoring completion metadata
 `group-function'.  When nil, candidates are still ordered with pending
 buffers first and are annotated with status tags."
   :type 'boolean)
+
+(defcustom agent-shell-attention-dashboard-buffer-name "*Agent Shell Attention*"
+  "Buffer name used by `agent-shell-attention-dashboard'."
+  :type 'string)
+
+(defcustom agent-shell-attention-dashboard-max-reason-length 80
+  "Maximum width of status text in the dashboard."
+  :type 'natnum)
+
+(defcustom agent-shell-attention-dashboard-buffer-column-width 30
+  "Width of the dashboard \"Buffer\" column."
+  :type '(integer 10 200))
+
+(defcustom agent-shell-attention-dashboard-time-format "%Y-%m-%d %H:%M:%S"
+  "Time format used in the dashboard \"Last active\" column.
+
+This format string is passed to `format-time-string'."
+  :type 'string)
+
+(defcustom agent-shell-attention-dashboard-permission-detail-length 40
+  "Maximum number of characters shown from permission detail text.
+
+When set to 0, permission entries in the dashboard status column are
+rendered as plain \"Permissions\"."
+  :type 'natnum)
 
 (defun agent-shell-attention--mode-line-list (value)
   "Return VALUE as a list suitable for mode-line variables."
@@ -317,7 +351,9 @@ entries for dead buffers."
              agent-shell-attention--pending)
     (dolist (buffer stale)
       (remhash buffer agent-shell-attention--pending)
-      (remhash buffer agent-shell-attention--busy))
+      (remhash buffer agent-shell-attention--busy)
+      (remhash buffer agent-shell-attention--busy-since)
+      (remhash buffer agent-shell-attention--last-event))
     (nreverse entries)))
 
 (defun agent-shell-attention--pending-entry-label (entry)
@@ -349,8 +385,10 @@ This call also purges stale entries for dead buffers."
              agent-shell-attention--busy)
     (dolist (buffer stale)
       (remhash buffer agent-shell-attention--busy)
+      (remhash buffer agent-shell-attention--busy-since)
       (unless (buffer-live-p buffer)
-        (remhash buffer agent-shell-attention--pending)))
+        (remhash buffer agent-shell-attention--pending)
+        (remhash buffer agent-shell-attention--last-event)))
     (nreverse buffers)))
 
 (defun agent-shell-attention--compute-active-count (pending-count)
@@ -390,6 +428,23 @@ This call also purges stale entries for dead buffers."
    (t (or (ignore-errors (map-elt object 'message))
           (ignore-errors (map-elt object 'code))))))
 
+(defun agent-shell-attention--sanitize-summary (summary)
+  "Return SUMMARY as a compact single-line string."
+  (let ((text (if (stringp summary) summary (format "%s" summary))))
+    (string-trim (replace-regexp-in-string "[ \t\n\r]+" " " text))))
+
+(defun agent-shell-attention--record-event (buffer status summary &optional timestamp)
+  "Remember BUFFER activity with STATUS and SUMMARY.
+TIMESTAMP defaults to current time."
+  (when (buffer-live-p buffer)
+    (let ((entry (list :status status
+                       :summary (agent-shell-attention--sanitize-summary summary)
+                       :timestamp (or timestamp (float-time)))))
+      (puthash buffer entry agent-shell-attention--last-event)
+      (with-current-buffer buffer
+        (add-hook 'kill-buffer-hook
+                  #'agent-shell-attention--on-buffer-killed nil t)))))
+
 (defun agent-shell-attention--maybe-notify (buffer title body)
   "Show notification for BUFFER with TITLE and BODY when configured."
   (when agent-shell-attention-notify-function
@@ -417,8 +472,15 @@ This call also purges stale entries for dead buffers."
     (when (gethash buffer agent-shell-attention--busy)
       (remhash buffer agent-shell-attention--busy)
       (setq changed t))
+    (when (gethash buffer agent-shell-attention--busy-since)
+      (remhash buffer agent-shell-attention--busy-since)
+      (setq changed t))
+    (when (gethash buffer agent-shell-attention--last-event)
+      (remhash buffer agent-shell-attention--last-event)
+      (setq changed t))
     (when changed
-      (force-mode-line-update t))))
+      (force-mode-line-update t)
+      (agent-shell-attention--maybe-refresh-dashboard))))
 
 (defun agent-shell-attention--clear-buffer (buffer)
   "Remove BUFFER from the pending table and refresh the mode line."
@@ -428,12 +490,14 @@ This call also purges stale entries for dead buffers."
     (when (and had-pending
                (buffer-live-p buffer)
                (not (gethash buffer agent-shell-attention--pending))
-               (not (gethash buffer agent-shell-attention--busy)))
+               (not (gethash buffer agent-shell-attention--busy))
+               (not (gethash buffer agent-shell-attention--last-event)))
       (with-current-buffer buffer
         (remove-hook 'kill-buffer-hook
                      #'agent-shell-attention--on-buffer-killed t)))
     (when had-pending
-      (force-mode-line-update t))))
+      (force-mode-line-update t)
+      (agent-shell-attention--maybe-refresh-dashboard))))
 
 (defun agent-shell-attention--maybe-clear-current ()
   "Clear the currently selected buffer if it no longer needs attention."
@@ -460,7 +524,8 @@ This call also purges stale entries for dead buffers."
   "Return ordered candidate records for active agent-shell buffers.
 
 Each record is a list (BUFFER ENTRY STATUS), where STATUS is either
-`pending' (awaiting user response) or `busy' (in-flight request)."
+`pending' (awaiting user response), `permission' (permission prompt),
+or `busy' (in-flight request)."
   (let* ((pending (copy-sequence (agent-shell-attention--pending-live-entries)))
          (pending-sorted (sort pending #'agent-shell-attention--entry-older-p))
          (busy-only (cl-remove-if
@@ -472,7 +537,12 @@ Each record is a list (BUFFER ENTRY STATUS), where STATUS is either
                               (string-lessp (buffer-name a) (buffer-name b)))))
          (records nil))
     (dolist (entry pending-sorted)
-      (push (list (car entry) (cdr entry) 'pending) records))
+      (push (list (car entry)
+                  (cdr entry)
+                  (if (agent-shell-attention--pending-entry-permission-p (cdr entry))
+                      'permission
+                    'pending))
+            records))
     (dolist (buffer busy-sorted)
       (push (list buffer nil 'busy) records))
     (nreverse records)))
@@ -500,8 +570,9 @@ unique if multiple entries would otherwise collide."
 (defun agent-shell-attention--completion-tag (status)
   "Return a visually distinguished completion tag for STATUS."
   (pcase status
-    ('pending (propertize "awaiting" 'face 'success))
-    ('busy (propertize "busy" 'face 'shadow))
+    ('pending (propertize "Awaiting" 'face 'success))
+    ('permission (propertize "Permissions" 'face 'warning))
+    ('busy (propertize "Running" 'face 'shadow))
     (_ (propertize "active" 'face 'shadow))))
 
 (defun agent-shell-attention--completion-annotation (display status-table)
@@ -537,8 +608,9 @@ CANDIDATES is an alist of (DISPLAY . (BUFFER . STATUS))."
                   (if transform
                       display
                     (pcase (gethash display status-table)
-                      ('pending "Awaiting response")
-                      ('busy "Busy")
+                      ('pending "Awaiting")
+                      ('permission "Permissions")
+                      ('busy "Running")
                       (_ "Active")))))
          (sorter (lambda (completions)
                    (sort (copy-sequence completions)
@@ -577,6 +649,251 @@ ENTRIES is an alist of (BUFFER . ENTRY)."
                      t))
            entries)))
 
+(defun agent-shell-attention--double-prefix-arg-p (prefix)
+  "Return non-nil when PREFIX corresponds to `C-u C-u'."
+  (or (equal prefix '(16))
+      (and (integerp prefix) (= prefix 16))))
+
+(defun agent-shell-attention--format-elapsed (timestamp)
+  "Return elapsed wall-clock time since TIMESTAMP as a short string."
+  (if (not (numberp timestamp))
+      "-"
+    (let* ((total (max 0 (truncate (- (float-time) timestamp))))
+           (days (/ total 86400))
+           (hours (% (/ total 3600) 24))
+           (mins (% (/ total 60) 60))
+           (secs (% total 60)))
+      (cond
+       ((> days 0) (format "%dd %02dh" days hours))
+       ((> hours 0) (format "%dh %02dm" hours mins))
+       ((> mins 0) (format "%dm %02ds" mins secs))
+       (t (format "%ds" secs))))))
+
+(defun agent-shell-attention--format-timestamp (timestamp)
+  "Return TIMESTAMP as a formatted dashboard time string."
+  (if (not (numberp timestamp))
+      "-"
+    (format-time-string agent-shell-attention-dashboard-time-format
+                        (seconds-to-time timestamp))))
+
+(defun agent-shell-attention--dashboard-time-column-width ()
+  "Return the width to reserve for the dashboard timestamp column."
+  (max 12 (length (agent-shell-attention--format-timestamp (float-time)))))
+
+(defun agent-shell-attention--truncate-text (text max-width)
+  "Clamp TEXT to MAX-WIDTH characters."
+  (let ((clean (agent-shell-attention--sanitize-summary text)))
+    (if (or (<= max-width 0)
+            (<= (length clean) max-width))
+        clean
+      (concat (substring clean 0 (max 0 (- max-width 3))) "..."))))
+
+(defun agent-shell-attention--truncate-reason (text)
+  "Clamp TEXT to `agent-shell-attention-dashboard-max-reason-length'."
+  (agent-shell-attention--truncate-text
+   text
+   agent-shell-attention-dashboard-max-reason-length))
+
+(defun agent-shell-attention--permission-status-text (label)
+  "Return dashboard status text for permission LABEL."
+  (let* ((detail (string-trim (string-remove-prefix "Permission:" label)))
+         (max-detail agent-shell-attention-dashboard-permission-detail-length))
+    (if (or (string-empty-p detail)
+            (<= max-detail 0))
+        "Permissions"
+      (format "Permissions: (%s)"
+              (agent-shell-attention--truncate-text detail max-detail)))))
+
+(defun agent-shell-attention--pending-status-text (pending-entry)
+  "Return dashboard status text for PENDING-ENTRY."
+  (let ((label (agent-shell-attention--sanitize-summary
+                (agent-shell-attention--pending-entry-label pending-entry))))
+    (if (string-prefix-p "Permission:" label)
+        (agent-shell-attention--permission-status-text label)
+      "Awaiting")))
+
+(defun agent-shell-attention--pending-entry-permission-p (pending-entry)
+  "Return non-nil when PENDING-ENTRY represents a permission request."
+  (let ((label (agent-shell-attention--sanitize-summary
+                (agent-shell-attention--pending-entry-label pending-entry))))
+    (string-prefix-p "Permission:" label)))
+
+(defun agent-shell-attention--dashboard-buffer-name (name)
+  "Return dashboard-friendly display text for buffer NAME.
+
+Long names are truncated on the left so the most specific suffix remains
+visible, then right-aligned by tabulated-list."
+  (let* ((raw (or name ""))
+         (width (max 4 agent-shell-attention-dashboard-buffer-column-width))
+         (len (length raw)))
+    (if (<= len width)
+        raw
+      (concat "…" (substring raw (max 0 (- len (1- width))))))))
+
+(defun agent-shell-attention--live-agent-shell-buffers ()
+  "Return all live `agent-shell-mode' buffers."
+  (let ((buffers nil))
+    (dolist (buffer (buffer-list))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (when (derived-mode-p 'agent-shell-mode)
+            (push buffer buffers)))))
+    (nreverse buffers)))
+
+(defun agent-shell-attention--dashboard-status-rank (status)
+  "Return sort rank for STATUS."
+  (pcase status
+    ('pending 0)
+    ('busy 1)
+    (_ 2)))
+
+(defun agent-shell-attention--dashboard-buffer-record (buffer pending-table)
+  "Return dashboard plist for BUFFER using PENDING-TABLE."
+  (let* ((pending-entry (gethash buffer pending-table))
+         (busy-count (gethash buffer agent-shell-attention--busy 0))
+         (busy-p (and (integerp busy-count) (> busy-count 0)))
+         (event (gethash buffer agent-shell-attention--last-event))
+         (event-time (plist-get event :timestamp))
+         (status (cond
+                  (pending-entry 'pending)
+                  (busy-p 'busy)
+                  (t 'idle)))
+         (activity-time (cond
+                         (pending-entry
+                          (agent-shell-attention--pending-entry-timestamp pending-entry))
+                         (busy-p
+                          (or (gethash buffer agent-shell-attention--busy-since)
+                              event-time))
+                         (t event-time)))
+         (status-text (cond
+                       (pending-entry
+                        (agent-shell-attention--pending-status-text pending-entry))
+                       (busy-p
+                        "Running")
+                       (t
+                        "Idle"))))
+    (list :buffer buffer
+          :name (buffer-name buffer)
+          :status status
+          :rank (agent-shell-attention--dashboard-status-rank status)
+          :activity-time activity-time
+          :status-text (agent-shell-attention--truncate-reason status-text))))
+
+(defun agent-shell-attention--dashboard-record< (a b)
+  "Return non-nil when dashboard record A should sort before B."
+  (let ((rank-a (plist-get a :rank))
+        (rank-b (plist-get b :rank)))
+    (cond
+     ((/= rank-a rank-b)
+      (< rank-a rank-b))
+     (t
+      (let ((time-a (or (plist-get a :activity-time) 0.0))
+            (time-b (or (plist-get b :activity-time) 0.0)))
+        (if (/= time-a time-b)
+            (> time-a time-b)
+          (string-lessp (plist-get a :name) (plist-get b :name))))))))
+
+(defun agent-shell-attention--dashboard-records ()
+  "Collect and sort dashboard records for all live agent-shell buffers."
+  (let ((pending-table (make-hash-table :test #'eq))
+        (records nil))
+    (dolist (entry (agent-shell-attention--pending-live-entries))
+      (puthash (car entry) (cdr entry) pending-table))
+    (agent-shell-attention--busy-live-buffers)
+    (dolist (buffer (agent-shell-attention--live-agent-shell-buffers))
+      (push (agent-shell-attention--dashboard-buffer-record buffer pending-table)
+            records))
+    (sort records #'agent-shell-attention--dashboard-record<)))
+
+(defun agent-shell-attention--dashboard-count (records status)
+  "Count how many RECORDS currently have STATUS."
+  (cl-count status records :key (lambda (record) (plist-get record :status))))
+
+(defun agent-shell-attention--dashboard-header-line (records)
+  "Return dashboard header line for RECORDS."
+  (format "Awaiting:%d  Running:%d  Idle:%d   RET: visit  g: refresh"
+          (agent-shell-attention--dashboard-count records 'pending)
+          (agent-shell-attention--dashboard-count records 'busy)
+          (agent-shell-attention--dashboard-count records 'idle)))
+
+(defun agent-shell-attention--dashboard-entries (records)
+  "Return tabulated list entries from dashboard RECORDS."
+  (mapcar
+   (lambda (record)
+     (let* ((buffer (plist-get record :buffer))
+            (activity-time (plist-get record :activity-time))
+            (timestamp (agent-shell-attention--format-timestamp activity-time))
+            (elapsed (agent-shell-attention--format-elapsed activity-time))
+            (timestamp-cell (if (numberp activity-time)
+                                (propertize timestamp
+                                            'help-echo (format "Elapsed: %s ago"
+                                                               elapsed))
+                              timestamp)))
+       (list buffer
+             (vector
+              (agent-shell-attention--dashboard-buffer-name
+               (plist-get record :name))
+              timestamp-cell
+              (plist-get record :status-text)))))
+   records))
+
+(defun agent-shell-attention--maybe-refresh-dashboard ()
+  "Refresh dashboard buffer when it is currently open."
+  (let ((buffer (get-buffer agent-shell-attention-dashboard-buffer-name)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when (derived-mode-p 'agent-shell-attention-dashboard-mode)
+          (agent-shell-attention-dashboard-refresh))))))
+
+(defun agent-shell-attention-dashboard-refresh ()
+  "Refresh the agent-shell attention dashboard."
+  (interactive)
+  (let ((records (agent-shell-attention--dashboard-records)))
+    (setq header-line-format (agent-shell-attention--dashboard-header-line records))
+    (setq tabulated-list-entries
+          (agent-shell-attention--dashboard-entries records))
+    (tabulated-list-print t)))
+
+(defun agent-shell-attention-dashboard-visit ()
+  "Visit agent-shell buffer on current dashboard row."
+  (interactive)
+  (let ((buffer (tabulated-list-get-id)))
+    (if (buffer-live-p buffer)
+        (agent-shell-attention--jump-to-buffer buffer)
+      (message "No live agent-shell buffer on this line")
+      (agent-shell-attention-dashboard-refresh))))
+
+(defvar agent-shell-attention-dashboard-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map tabulated-list-mode-map)
+    (define-key map (kbd "RET") #'agent-shell-attention-dashboard-visit)
+    map)
+  "Keymap used in `agent-shell-attention-dashboard-mode'.")
+
+(define-derived-mode agent-shell-attention-dashboard-mode tabulated-list-mode "ASA Dashboard"
+  "Tabulated heads-up display for `agent-shell-attention'."
+  (setq tabulated-list-format
+        (vector
+         `("Buffer" ,agent-shell-attention-dashboard-buffer-column-width t
+           :right-align t)
+         `("Last active" ,(agent-shell-attention--dashboard-time-column-width) nil)
+         '("Status" 0 t)))
+  (setq tabulated-list-padding 2)
+  (setq tabulated-list-sort-key nil)
+  (add-hook 'tabulated-list-revert-hook
+            #'agent-shell-attention-dashboard-refresh nil t)
+  (tabulated-list-init-header))
+
+;;;###autoload
+(defun agent-shell-attention-dashboard ()
+  "Open a tabulated status dashboard for live agent-shell buffers."
+  (interactive)
+  (let ((buffer (get-buffer-create agent-shell-attention-dashboard-buffer-name)))
+    (with-current-buffer buffer
+      (agent-shell-attention-dashboard-mode)
+      (agent-shell-attention-dashboard-refresh))
+    (pop-to-buffer buffer)))
+
 ;;;###autoload
 (defun agent-shell-attention-jump (&optional prompt)
   "Jump to an agent-shell buffer awaiting your response.
@@ -585,24 +902,31 @@ With PROMPT (prefix argument), use `completing-read' to select from all
 active agent-shell buffers, ordered with pending buffers first and
 busy buffers after.
 
+With a double prefix argument (\\[universal-argument] \\[universal-argument]),
+open `agent-shell-attention-dashboard'.
+
 Without PROMPT, jump to the oldest pending buffer."
   (interactive "P")
-  (if prompt
-      (let* ((records (agent-shell-attention--active-entry-records)))
-        (if (null records)
-            (message "No active agent-shell buffers")
-          (let* ((candidates (agent-shell-attention--unique-candidates-with-status records))
-                 (table (agent-shell-attention--completion-table candidates))
-                 (choice (completing-read "Agent shell: " table nil t))
-                 (entry (assoc choice candidates))
-                 (buffer (and entry (cadr entry))))
-            (when (buffer-live-p buffer)
-              (agent-shell-attention--jump-to-buffer buffer)))))
+  (cond
+   ((agent-shell-attention--double-prefix-arg-p prompt)
+    (agent-shell-attention-dashboard))
+   (prompt
+    (let* ((records (agent-shell-attention--active-entry-records)))
+      (if (null records)
+          (message "No active agent-shell buffers")
+        (let* ((candidates (agent-shell-attention--unique-candidates-with-status records))
+               (table (agent-shell-attention--completion-table candidates))
+               (choice (completing-read "Agent shell: " table nil t))
+               (entry (assoc choice candidates))
+               (buffer (and entry (cadr entry))))
+          (when (buffer-live-p buffer)
+            (agent-shell-attention--jump-to-buffer buffer))))))
+   (t
     (let* ((entries (copy-sequence (agent-shell-attention--pending-live-entries)))
            (sorted (sort entries #'agent-shell-attention--entry-older-p)))
       (if (null sorted)
           (message "No agent-shell buffers awaiting replies")
-        (agent-shell-attention--jump-to-buffer (caar sorted))))))
+        (agent-shell-attention--jump-to-buffer (caar sorted)))))))
 
 (defun agent-shell-attention-open-menu (&optional event)
   "Show pending agent-shell buffers in a popup menu.
@@ -657,14 +981,25 @@ ACTIVE-COUNT is accepted for API compatibility but ignored."
 (defun agent-shell-attention--mark-busy (buffer)
   "Mark BUFFER as busy (with an in-flight request)."
   (when (buffer-live-p buffer)
-    (let ((count (gethash buffer agent-shell-attention--busy 0)))
-      (puthash buffer (1+ (if (and (integerp count) (> count 0)) count 0))
-               agent-shell-attention--busy))
+    (let* ((count (gethash buffer agent-shell-attention--busy 0))
+           (previous (if (and (integerp count) (> count 0)) count 0))
+           (current (1+ previous))
+           (now (float-time)))
+      (puthash buffer current agent-shell-attention--busy)
+      (unless (> previous 0)
+        (puthash buffer now agent-shell-attention--busy-since))
+      (agent-shell-attention--record-event
+       buffer 'busy
+       (if (> current 1)
+           (format "Running (%d requests)" current)
+         "Running")
+       now))
     (with-current-buffer buffer
       (add-hook 'kill-buffer-hook
                 #'agent-shell-attention--on-buffer-killed nil t))
     (agent-shell-attention--ensure-mode-line-entry)
-    (force-mode-line-update t)))
+    (force-mode-line-update t)
+    (agent-shell-attention--maybe-refresh-dashboard)))
 
 (defun agent-shell-attention--clear-busy (buffer)
   "Clear one busy mark for BUFFER, removing it when the refcount hits 0."
@@ -674,12 +1009,15 @@ ACTIVE-COUNT is accepted for API compatibility but ignored."
       (if (> new-count 0)
           (puthash buffer new-count agent-shell-attention--busy)
         (remhash buffer agent-shell-attention--busy)
+        (remhash buffer agent-shell-attention--busy-since)
         (when (buffer-live-p buffer)
           (with-current-buffer buffer
-            (unless (gethash buffer agent-shell-attention--pending)
+            (unless (or (gethash buffer agent-shell-attention--pending)
+                        (gethash buffer agent-shell-attention--last-event))
               (remove-hook 'kill-buffer-hook
                            #'agent-shell-attention--on-buffer-killed t)))))))
-  (force-mode-line-update t))
+  (force-mode-line-update t)
+  (agent-shell-attention--maybe-refresh-dashboard))
 
 (defun agent-shell-attention--tool-call-awaits-permission-p (tool-call)
   "Return non-nil when TOOL-CALL still requires a user decision."
@@ -717,19 +1055,25 @@ When FORCE is non-nil, mark the buffer even if it's currently selected."
     (let ((should-track (or force
                             (agent-shell-attention--should-notify-buffer buffer))))
       (when should-track
-        (unless (gethash buffer agent-shell-attention--pending)
-          (with-current-buffer buffer
-            (add-hook 'kill-buffer-hook
-                      #'agent-shell-attention--on-buffer-killed nil t)))
-        (puthash buffer (cons label (float-time)) agent-shell-attention--pending)
+        (let ((now (float-time)))
+          (agent-shell-attention--record-event buffer 'pending label now)
+          (unless (gethash buffer agent-shell-attention--pending)
+            (with-current-buffer buffer
+              (add-hook 'kill-buffer-hook
+                        #'agent-shell-attention--on-buffer-killed nil t)))
+          (puthash buffer (cons label now) agent-shell-attention--pending))
         (agent-shell-attention--ensure-mode-line-entry)
-        (force-mode-line-update t)))))
+        (force-mode-line-update t)
+        (agent-shell-attention--maybe-refresh-dashboard)))))
 
 (defun agent-shell-attention--handle-success (buffer response)
   "Process successful agent RESPONSE for BUFFER."
   (let* ((stop-reason (map-elt response 'stopReason))
          (description (agent-shell-attention--describe-stop stop-reason))
          (awaiting (agent-shell-attention--awaiting-p stop-reason)))
+    (unless awaiting
+      (agent-shell-attention--record-event buffer 'done description)
+      (agent-shell-attention--maybe-refresh-dashboard))
     (when (agent-shell-attention--should-notify-buffer buffer)
       (agent-shell-attention--message buffer description))
     (when awaiting
@@ -740,6 +1084,8 @@ When FORCE is non-nil, mark the buffer even if it's currently selected."
   (let ((details (or (agent-shell-attention--extract-message error)
                      (agent-shell-attention--extract-message raw-message)
                      "Request failed")))
+    (agent-shell-attention--record-event buffer 'failed details)
+    (agent-shell-attention--maybe-refresh-dashboard)
     (when (agent-shell-attention--should-notify-buffer buffer)
       (agent-shell-attention--message buffer details))))
 
@@ -831,7 +1177,8 @@ ARGS are provided by `agent-shell--send-permission-response'."
         (when (buffer-live-p buffer)
           (unless (agent-shell-attention--permission-pending-p buffer)
             (agent-shell-attention--clear-buffer buffer))
-          (force-mode-line-update t))))))
+          (force-mode-line-update t)
+          (agent-shell-attention--maybe-refresh-dashboard))))))
 
 ;;; Minor mode
 
@@ -889,9 +1236,18 @@ ARGS are provided by `agent-shell--send-permission-response'."
                  (remove-hook 'kill-buffer-hook
                               #'agent-shell-attention--on-buffer-killed t))))
            agent-shell-attention--busy)
+  (maphash (lambda (buffer _)
+             (when (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (remove-hook 'kill-buffer-hook
+                              #'agent-shell-attention--on-buffer-killed t))))
+           agent-shell-attention--last-event)
   (clrhash agent-shell-attention--pending)
   (clrhash agent-shell-attention--busy)
-  (force-mode-line-update t))
+  (clrhash agent-shell-attention--busy-since)
+  (clrhash agent-shell-attention--last-event)
+  (force-mode-line-update t)
+  (agent-shell-attention--maybe-refresh-dashboard))
 
 (defvar agent-shell-attention-mode-map
   (let ((map (make-sparse-keymap)))

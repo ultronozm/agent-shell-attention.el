@@ -144,6 +144,33 @@
             (should (equal (funcall group-fn display t) display))))
       (when (buffer-live-p pending-buf) (kill-buffer pending-buf)))))
 
+(ert-deftest agent-shell-attention--completion-tags-match-dashboard-vocabulary ()
+  (should (equal (substring-no-properties
+                  (agent-shell-attention--completion-tag 'pending))
+                 "Awaiting"))
+  (should (equal (substring-no-properties
+                  (agent-shell-attention--completion-tag 'permission))
+                 "Permissions"))
+  (should (equal (substring-no-properties
+                  (agent-shell-attention--completion-tag 'busy))
+                 "Running")))
+
+(ert-deftest agent-shell-attention--active-entry-records-detects-permissions ()
+  (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
+        (agent-shell-attention--busy (make-hash-table :test #'eq))
+        (permission-buf (generate-new-buffer " *asa-permission*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer permission-buf (agent-shell-mode))
+          (puthash permission-buf (cons "Permission: write file" 1.0)
+                   agent-shell-attention--pending)
+          (let ((records (agent-shell-attention--active-entry-records)))
+            (should (= (length records) 1))
+            (should (eq (nth 0 (car records)) permission-buf))
+            (should (eq (nth 2 (car records)) 'permission))))
+      (when (buffer-live-p permission-buf)
+        (kill-buffer permission-buf)))))
+
 (ert-deftest agent-shell-attention--around-send-command-supports-shell-buffer ()
   (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
         (agent-shell-attention--busy (make-hash-table :test #'eq))
@@ -183,6 +210,156 @@
             (should request-decorated)))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
+
+(ert-deftest agent-shell-attention-jump-double-prefix-opens-dashboard ()
+  (let ((opened nil))
+    (cl-letf (((symbol-function 'agent-shell-attention-dashboard)
+               (lambda ()
+                 (setq opened t))))
+      (agent-shell-attention-jump '(16))
+      (should opened))))
+
+(ert-deftest agent-shell-attention--dashboard-records-status-order ()
+  (let* ((agent-shell-attention--pending (make-hash-table :test #'eq))
+         (agent-shell-attention--busy (make-hash-table :test #'eq))
+         (agent-shell-attention--busy-since (make-hash-table :test #'eq))
+         (agent-shell-attention--last-event (make-hash-table :test #'eq))
+         (pending-buf (generate-new-buffer " *asa-dashboard-pending*"))
+         (busy-buf (generate-new-buffer " *asa-dashboard-busy*"))
+         (failed-buf (generate-new-buffer " *asa-dashboard-failed*"))
+         (done-buf (generate-new-buffer " *asa-dashboard-done*"))
+         (idle-buf (generate-new-buffer " *asa-dashboard-idle*")))
+    (unwind-protect
+        (progn
+          (dolist (buffer (list pending-buf busy-buf failed-buf done-buf idle-buf))
+            (with-current-buffer buffer
+              (agent-shell-mode)))
+          (puthash pending-buf (cons "Permission: write file" 10.0)
+                   agent-shell-attention--pending)
+          (puthash busy-buf 1 agent-shell-attention--busy)
+          (puthash busy-buf 20.0 agent-shell-attention--busy-since)
+          (puthash failed-buf (list :status 'failed
+                                    :summary "Network timeout"
+                                    :timestamp 40.0)
+                   agent-shell-attention--last-event)
+          (puthash done-buf (list :status 'done
+                                  :summary "Finished"
+                                  :timestamp 30.0)
+                   agent-shell-attention--last-event)
+          (let* ((records (agent-shell-attention--dashboard-records))
+                 (statuses (mapcar (lambda (record)
+                                     (plist-get record :status))
+                                   records)))
+            (should (equal statuses '(pending busy idle idle idle)))
+            (should (equal (plist-get (nth 0 records) :status-text)
+                           "Permissions: (write file)"))
+            (should (equal (plist-get (nth 1 records) :status-text) "Running"))
+            (should (equal (plist-get (nth 2 records) :status-text) "Idle"))
+            (should (equal (plist-get (nth 3 records) :status-text) "Idle"))
+            (should (equal (plist-get (nth 4 records) :status-text) "Idle"))))
+      (dolist (buffer (list pending-buf busy-buf failed-buf done-buf idle-buf))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest agent-shell-attention--pending-status-text ()
+  (should (equal (agent-shell-attention--pending-status-text
+                  (cons "Finished" 1.0))
+                 "Awaiting"))
+  (should (equal (agent-shell-attention--pending-status-text
+                  (cons "Permission: Run touch /tmp/probe (execute)" 1.0))
+                 "Permissions: (Run touch /tmp/probe (execute))")))
+
+(ert-deftest agent-shell-attention--pending-status-text-truncation-customizable ()
+  (let ((agent-shell-attention-dashboard-permission-detail-length 10))
+    (should (equal (agent-shell-attention--pending-status-text
+                    (cons "Permission: long permission detail" 1.0))
+                   "Permissions: (long pe...)")))
+  (let ((agent-shell-attention-dashboard-permission-detail-length 0))
+    (should (equal (agent-shell-attention--pending-status-text
+                    (cons "Permission: long permission detail" 1.0))
+                   "Permissions"))))
+
+(ert-deftest agent-shell-attention--dashboard-buffer-name-right-truncates ()
+  (let ((agent-shell-attention-dashboard-buffer-column-width 12))
+    (should (equal (agent-shell-attention--dashboard-buffer-name "short")
+                   "short"))
+    (let ((name (agent-shell-attention--dashboard-buffer-name
+                 "Codex Agent @ emacsd")))
+      (should (string-prefix-p "…" name))
+      (should (string-suffix-p "emacsd" name))
+      (should (<= (length name) 12)))))
+
+(ert-deftest agent-shell-attention--dashboard-timestamp-format-customizable ()
+  (let* ((ts 1234567890.0)
+         (agent-shell-attention-dashboard-time-format "%Y-%m-%d")
+         (expected (format-time-string "%Y-%m-%d" (seconds-to-time ts))))
+    (should (equal (agent-shell-attention--format-timestamp ts) expected))
+    (should (equal (agent-shell-attention--format-timestamp nil) "-"))))
+
+(ert-deftest agent-shell-attention--dashboard-entry-time-help-echo ()
+  (let* ((record (list :buffer (current-buffer)
+                       :name "buf"
+                       :activity-time 10.0
+                       :status-text "Idle"))
+         (entries (agent-shell-attention--dashboard-entries (list record)))
+         (cols (cadr (car entries)))
+         (timestamp (aref cols 1)))
+    (should (stringp timestamp))
+    (should (stringp (get-text-property 0 'help-echo timestamp)))
+    (should (string-match-p "Elapsed:" (get-text-property 0 'help-echo timestamp)))))
+
+(ert-deftest agent-shell-attention-dashboard-mode-buffer-column-customized ()
+  (let ((agent-shell-attention-dashboard-buffer-column-width 24))
+    (with-temp-buffer
+      (agent-shell-attention-dashboard-mode)
+      (let ((column (aref tabulated-list-format 0)))
+        (should (equal (nth 1 column) 24))
+        (should (plist-get (nthcdr 3 column) :right-align))))))
+
+(ert-deftest agent-shell-attention--state-change-hooks-refresh-dashboard ()
+  (let* ((agent-shell-attention--pending (make-hash-table :test #'eq))
+         (agent-shell-attention--busy (make-hash-table :test #'eq))
+         (agent-shell-attention--busy-since (make-hash-table :test #'eq))
+         (agent-shell-attention--last-event (make-hash-table :test #'eq))
+         (buffer (generate-new-buffer " *asa-refresh*"))
+         (refreshes 0))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (agent-shell-mode))
+          (cl-letf (((symbol-function 'agent-shell-attention--maybe-refresh-dashboard)
+                     (lambda ()
+                       (setq refreshes (1+ refreshes)))))
+            (agent-shell-attention--mark-busy buffer)
+            (agent-shell-attention--clear-busy buffer)
+            (agent-shell-attention--mark-buffer buffer "Permission: foo" :force t)
+            (agent-shell-attention--clear-buffer buffer))
+          (should (= refreshes 4)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest agent-shell-attention--dashboard-running-overrides-stale-permission-summary ()
+  (let* ((agent-shell-attention--pending (make-hash-table :test #'eq))
+         (agent-shell-attention--busy (make-hash-table :test #'eq))
+         (agent-shell-attention--busy-since (make-hash-table :test #'eq))
+         (agent-shell-attention--last-event (make-hash-table :test #'eq))
+         (busy-buf (generate-new-buffer " *asa-dashboard-running*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer busy-buf
+            (agent-shell-mode))
+          (puthash busy-buf 1 agent-shell-attention--busy)
+          (puthash busy-buf 20.0 agent-shell-attention--busy-since)
+          (puthash busy-buf
+                   (list :status 'pending
+                         :summary "Permission: Run touch /tmp/probe (execute)"
+                         :timestamp 10.0)
+                   agent-shell-attention--last-event)
+          (let ((record (car (agent-shell-attention--dashboard-records))))
+            (should (eq (plist-get record :status) 'busy))
+            (should (equal (plist-get record :status-text) "Running"))))
+      (when (buffer-live-p busy-buf)
+        (kill-buffer busy-buf)))))
 
 (provide 'agent-shell-attention-test)
 

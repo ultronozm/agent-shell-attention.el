@@ -15,3 +15,8 @@ dist/
 
 # Undo-tree save-files
 *.~undo-tree
+
+# Local tooling artifacts
+.audit/
+.run/
+.tmp/
