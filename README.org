@@ -23,10 +23,10 @@ When one or more agent buffers need attention, an =AS:n= indicator appears in th
 
 * Basic customization
 
-To bind the jump command when the minor mode is active:
+Bind the jump command globally:
 
 #+begin_src emacs-lisp
-(keymap-set agent-shell-attention-mode-map "C-z a" #'agent-shell-attention-jump)
+(keymap-global-set "C-z a" #'agent-shell-attention-jump)
 #+end_src
 
 To display the number of pending *and* busy buffers as =AS:n/m=:
@@ -104,8 +104,7 @@ Here is a complete example config using [[https://github.com/progfolio/elpaca][e
   :ensure (:host github :repo "ultronozm/agent-shell-attention.el")
   :after agent-shell
   :demand
-  :bind (:map agent-shell-attention-mode-map
-              ("C-z a" . agent-shell-attention-jump))
+  :bind (("C-z a" . agent-shell-attention-jump))
   :config
   (require 'knockknock)
   (setopt agent-shell-attention-notify-function
