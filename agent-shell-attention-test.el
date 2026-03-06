@@ -279,6 +279,34 @@
                     (cons "Permission: long permission detail" 1.0))
                    "Permissions"))))
 
+(ert-deftest agent-shell-attention--around-on-request-supports-both-keywords ()
+  (let ((state '(:buffer fake-buffer))
+        (request '((method . "session/request_permission")))
+        handled
+        forwarded)
+    (cl-letf (((symbol-function 'agent-shell-attention--handle-request)
+               (lambda (state-arg request-arg)
+                 (setq handled (list state-arg request-arg)))))
+      (agent-shell-attention--around-on-request
+       (lambda (&rest args)
+         (setq forwarded args))
+       :state state
+       :request request)
+      (should (equal handled (list state request)))
+      (should (equal forwarded (list :state state :request request))))
+    (setq handled nil
+          forwarded nil)
+    (cl-letf (((symbol-function 'agent-shell-attention--handle-request)
+               (lambda (state-arg request-arg)
+                 (setq handled (list state-arg request-arg)))))
+      (agent-shell-attention--around-on-request
+       (lambda (&rest args)
+         (setq forwarded args))
+       :state state
+       :acp-request request)
+      (should (equal handled (list state request)))
+      (should (equal forwarded (list :state state :acp-request request))))))
+
 (ert-deftest agent-shell-attention--dashboard-buffer-name-right-truncates ()
   (let ((agent-shell-attention-dashboard-buffer-column-width 12))
     (should (equal (agent-shell-attention--dashboard-buffer-name "short")

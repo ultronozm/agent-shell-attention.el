@@ -1173,7 +1173,11 @@ Intercept completions to track buffers awaiting user input."
 
 Catch permission prompts and mark buffers awaiting input."
   (let ((state (plist-get args :state))
-        (request (plist-get args :request)))
+        ;; `agent-shell--on-request' used :request and now uses
+        ;; :acp-request.  Accept both so the advice remains compatible
+        ;; across agent-shell versions.
+        (request (or (plist-get args :acp-request)
+                     (plist-get args :request))))
     (when (and state request)
       (agent-shell-attention--handle-request state request))
     (apply orig-fn args)))
