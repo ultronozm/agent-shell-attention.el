@@ -46,6 +46,7 @@
 (declare-function agent-shell--send-command "agent-shell")
 (declare-function agent-shell--send-permission-response "agent-shell")
 (declare-function agent-shell--stop-reason-description "agent-shell")
+(declare-function dired "dired" (&optional dirname switches))
 (declare-function acp-send-request "acp")
 
 (defgroup agent-shell-attention nil
@@ -792,7 +793,7 @@ visible, then right-aligned by tabulated-list."
 
 (defun agent-shell-attention--dashboard-header-line (records)
   "Return dashboard header line for RECORDS."
-  (format "Awaiting:%d  Running:%d  Idle:%d   RET: visit  g: refresh"
+  (format "Awaiting:%d  Running:%d  Idle:%d   RET: visit  o: other window  j: ambient dir  D: kill session  g: refresh"
           (agent-shell-attention--dashboard-count records 'pending)
           (agent-shell-attention--dashboard-count records 'busy)
           (agent-shell-attention--dashboard-count records 'idle)))
@@ -832,16 +833,50 @@ visible, then right-aligned by tabulated-list."
 (defun agent-shell-attention-dashboard-visit ()
   "Visit agent-shell buffer on current dashboard row."
   (interactive)
+  (when-let* ((buffer (agent-shell-attention-dashboard--selected-live-buffer)))
+    (agent-shell-attention--jump-to-buffer buffer)))
+
+(defun agent-shell-attention-dashboard-visit-other-window ()
+  "Visit agent-shell buffer on current dashboard row in another window."
+  (interactive)
+  (when-let* ((buffer (agent-shell-attention-dashboard--selected-live-buffer)))
+    (unless (agent-shell-attention--permission-pending-p buffer)
+      (agent-shell-attention--clear-buffer buffer))
+    (switch-to-buffer-other-window buffer)))
+
+(defun agent-shell-attention-dashboard-open-ambient-directory ()
+  "Open dashboard row buffer's ambient directory in Dired."
+  (interactive)
+  (when-let* ((buffer (agent-shell-attention-dashboard--selected-live-buffer)))
+    (let ((directory (with-current-buffer buffer default-directory)))
+      (dired directory))))
+
+(defun agent-shell-attention-dashboard-kill-session ()
+  "Kill the dashboard row's agent-shell session."
+  (interactive)
+  (when-let* ((buffer (agent-shell-attention-dashboard--selected-live-buffer)))
+    (when (yes-or-no-p (format "Kill session for %s? " (buffer-name buffer)))
+      (kill-buffer buffer)
+      (agent-shell-attention-dashboard-refresh))))
+
+(defun agent-shell-attention-dashboard--selected-live-buffer ()
+  "Return live agent-shell buffer on current dashboard row.
+
+If the row is stale, show an explanatory message and refresh."
   (let ((buffer (tabulated-list-get-id)))
     (if (buffer-live-p buffer)
-        (agent-shell-attention--jump-to-buffer buffer)
+        buffer
       (message "No live agent-shell buffer on this line")
-      (agent-shell-attention-dashboard-refresh))))
+      (agent-shell-attention-dashboard-refresh)
+      nil)))
 
 (defvar agent-shell-attention-dashboard-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map tabulated-list-mode-map)
     (define-key map (kbd "RET") #'agent-shell-attention-dashboard-visit)
+    (define-key map (kbd "o") #'agent-shell-attention-dashboard-visit-other-window)
+    (define-key map (kbd "j") #'agent-shell-attention-dashboard-open-ambient-directory)
+    (define-key map (kbd "D") #'agent-shell-attention-dashboard-kill-session)
     map)
   "Keymap used in `agent-shell-attention-dashboard-mode'.")
 

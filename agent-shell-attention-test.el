@@ -315,6 +315,76 @@
         (should (equal (nth 1 column) 24))
         (should (plist-get (nthcdr 3 column) :right-align))))))
 
+(ert-deftest agent-shell-attention-dashboard-mode-map-includes-session-actions ()
+  (should (eq (lookup-key agent-shell-attention-dashboard-mode-map (kbd "D"))
+              #'agent-shell-attention-dashboard-kill-session))
+  (should (eq (lookup-key agent-shell-attention-dashboard-mode-map (kbd "o"))
+              #'agent-shell-attention-dashboard-visit-other-window))
+  (should (eq (lookup-key agent-shell-attention-dashboard-mode-map (kbd "j"))
+              #'agent-shell-attention-dashboard-open-ambient-directory)))
+
+(ert-deftest agent-shell-attention-dashboard-visit-other-window-clears-pending ()
+  (let ((buffer (generate-new-buffer " *asa-dashboard-other-window*"))
+        (cleared nil)
+        (visited nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (agent-shell-mode))
+          (cl-letf (((symbol-function 'agent-shell-attention-dashboard--selected-live-buffer)
+                     (lambda () buffer))
+                    ((symbol-function 'agent-shell-attention--permission-pending-p)
+                     (lambda (_buffer) nil))
+                    ((symbol-function 'agent-shell-attention--clear-buffer)
+                     (lambda (buf)
+                       (setq cleared buf)))
+                    ((symbol-function 'switch-to-buffer-other-window)
+                     (lambda (buf &optional _norecord)
+                       (setq visited buf))))
+            (agent-shell-attention-dashboard-visit-other-window)
+            (should (eq visited buffer))
+            (should (eq cleared buffer))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest agent-shell-attention-dashboard-open-ambient-directory-uses-buffer-directory ()
+  (let ((buffer (generate-new-buffer " *asa-dashboard-ambient*"))
+        (opened-dir nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (agent-shell-mode)
+            (setq default-directory "/tmp/"))
+          (cl-letf (((symbol-function 'agent-shell-attention-dashboard--selected-live-buffer)
+                     (lambda () buffer))
+                    ((symbol-function 'dired)
+                     (lambda (directory &optional _switches)
+                       (setq opened-dir directory))))
+            (agent-shell-attention-dashboard-open-ambient-directory)
+            (should (equal opened-dir "/tmp/"))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest agent-shell-attention-dashboard-kill-session-kills-selected-buffer ()
+  (let ((buffer (generate-new-buffer " *asa-dashboard-kill*"))
+        (refreshed nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (agent-shell-mode))
+          (cl-letf (((symbol-function 'agent-shell-attention-dashboard--selected-live-buffer)
+                     (lambda () buffer))
+                    ((symbol-function 'yes-or-no-p)
+                     (lambda (_prompt) t))
+                    ((symbol-function 'agent-shell-attention-dashboard-refresh)
+                     (lambda ()
+                       (setq refreshed t))))
+            (agent-shell-attention-dashboard-kill-session)
+            (should-not (buffer-live-p buffer))
+            (should refreshed)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest agent-shell-attention--state-change-hooks-refresh-dashboard ()
   (let* ((agent-shell-attention--pending (make-hash-table :test #'eq))
          (agent-shell-attention--busy (make-hash-table :test #'eq))

@@ -18,6 +18,7 @@ When one or more agent buffers need attention, an =AS:n= indicator appears in th
   - Without a prefix argument, jump to the oldest pending buffer.
   - With =C-u=, prompt with completion from all active agent-shell buffers (awaiting or busy)
   - With =C-u C-u=, open a dashboard for all live =agent-shell= buffers, sorted by status (awaiting, running, idle), with last-active timestamps and status text (=Idle=, =Awaiting=, =Running=, or =Permissions: (...)=).  You can also call =M-x agent-shell-attention-dashboard= directly.
+    In the dashboard, =RET= visits the session, =o= visits in another window, =j= opens the session's ambient directory, and =D= kills the selected session.
 
 "Awaiting reply" prompts clear when you visit the buffer, while "tool permission" prompts remain pending until you actually respond.
 
