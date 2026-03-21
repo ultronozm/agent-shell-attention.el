@@ -80,9 +80,10 @@
     (unwind-protect
         (progn
           (with-current-buffer pending-buf (agent-shell-mode))
-          (with-current-buffer busy-buf (agent-shell-mode))
+          (with-current-buffer busy-buf
+            (agent-shell-mode)
+            (setq agent-shell--state (list (cons :active-requests '(req)))))
           (puthash pending-buf (cons "Need reply" 1.0) agent-shell-attention--pending)
-          (puthash busy-buf 1 agent-shell-attention--busy)
           (let ((records (agent-shell-attention--active-entry-records)))
             (should (= (length records) 2))
             (should (eq (nth 0 (nth 0 records)) pending-buf))
@@ -102,11 +103,13 @@
     (unwind-protect
         (progn
           (with-current-buffer pending-buf (agent-shell-mode))
-          (with-current-buffer busy-buf (agent-shell-mode))
+          (with-current-buffer busy-buf
+            (agent-shell-mode)
+            (setq agent-shell--state (list (cons :active-requests '(req)))))
           ;; Mark the same buffer both pending and busy; it should only appear once.
           (puthash pending-buf (cons "Need reply" 1.0) agent-shell-attention--pending)
-          (puthash pending-buf 1 agent-shell-attention--busy)
-          (puthash busy-buf 1 agent-shell-attention--busy)
+          (with-current-buffer pending-buf
+            (setq agent-shell--state (list (cons :active-requests '(req)))))
           (let* ((records (agent-shell-attention--active-entry-records))
                  (candidates (agent-shell-attention--unique-candidates-with-status records))
                  (table (agent-shell-attention--completion-table candidates))
@@ -171,6 +174,27 @@
       (when (buffer-live-p permission-buf)
         (kill-buffer permission-buf)))))
 
+(ert-deftest agent-shell-attention--busy-live-buffers-syncs-from-active-requests ()
+  (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
+        (agent-shell-attention--busy (make-hash-table :test #'eq))
+        (agent-shell-attention--busy-since (make-hash-table :test #'eq))
+        (agent-shell-attention--last-event (make-hash-table :test #'eq))
+        (buffer (generate-new-buffer " *asa-busy-sync*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (agent-shell-mode)
+            (setq agent-shell--state (list (cons :active-requests '(req)))))
+          (should (equal (agent-shell-attention--busy-live-buffers)
+                         (list buffer)))
+          (should (gethash buffer agent-shell-attention--busy))
+          (with-current-buffer buffer
+            (setf (map-elt agent-shell--state :active-requests) nil))
+          (should-not (agent-shell-attention--busy-live-buffers))
+          (should-not (gethash buffer agent-shell-attention--busy)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest agent-shell-attention--around-send-command-supports-shell-buffer ()
   (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
         (agent-shell-attention--busy (make-hash-table :test #'eq))
@@ -211,6 +235,47 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest agent-shell-attention--decorate-request-wraps-success-and-failure ()
+  (let ((buffer (generate-new-buffer " *asa-decorate*"))
+        (success-called nil)
+        (failure-called nil)
+        (orig-success nil)
+        (orig-failure nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (agent-shell-mode))
+          (cl-letf (((symbol-function 'agent-shell-attention--clear-busy)
+                     (lambda (_buffer)
+                       (setq success-called (or success-called 'cleared))
+                       (setq failure-called (or failure-called 'cleared))))
+                    ((symbol-function 'agent-shell-attention--handle-success)
+                     (lambda (_buffer response)
+                       (setq success-called response)))
+                    ((symbol-function 'agent-shell-attention--handle-failure)
+                     (lambda (_buffer error raw-message)
+                       (setq failure-called (list error raw-message)))))
+            (let* ((wrapped (agent-shell-attention--decorate-request
+                             buffer
+                             (list :on-success (lambda (response)
+                                                 (setq orig-success response))
+                                   :on-failure (lambda (error raw-message)
+                                                 (setq orig-failure
+                                                       (list error raw-message))))))
+                   (success-fn (plist-get wrapped :on-success))
+                   (failure-fn (plist-get wrapped :on-failure))
+                   (response '((stopReason . "end_turn")))
+                   (error '((message . "boom")))
+                   (raw '((message . "raw"))))
+              (funcall success-fn response)
+              (should (equal success-called response))
+              (should (equal orig-success response))
+              (funcall failure-fn error raw)
+              (should (equal failure-called (list error raw)))
+              (should (equal orig-failure (list error raw))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest agent-shell-attention-jump-double-prefix-opens-dashboard ()
   (let ((opened nil))
     (cl-letf (((symbol-function 'agent-shell-attention-dashboard)
@@ -236,7 +301,8 @@
               (agent-shell-mode)))
           (puthash pending-buf (cons "Permission: write file" 10.0)
                    agent-shell-attention--pending)
-          (puthash busy-buf 1 agent-shell-attention--busy)
+          (with-current-buffer busy-buf
+            (setq agent-shell--state (list (cons :active-requests '(req)))))
           (puthash busy-buf 20.0 agent-shell-attention--busy-since)
           (puthash failed-buf (list :status 'failed
                                     :summary "Network timeout"
@@ -279,33 +345,76 @@
                     (cons "Permission: long permission detail" 1.0))
                    "Permissions"))))
 
-(ert-deftest agent-shell-attention--around-on-request-supports-both-keywords ()
-  (let ((state '(:buffer fake-buffer))
-        (request '((method . "session/request_permission")))
-        handled
-        forwarded)
-    (cl-letf (((symbol-function 'agent-shell-attention--handle-request)
-               (lambda (state-arg request-arg)
-                 (setq handled (list state-arg request-arg)))))
-      (agent-shell-attention--around-on-request
-       (lambda (&rest args)
-         (setq forwarded args))
-       :state state
-       :request request)
-      (should (equal handled (list state request)))
-      (should (equal forwarded (list :state state :request request))))
-    (setq handled nil
-          forwarded nil)
-    (cl-letf (((symbol-function 'agent-shell-attention--handle-request)
-               (lambda (state-arg request-arg)
-                 (setq handled (list state-arg request-arg)))))
-      (agent-shell-attention--around-on-request
-       (lambda (&rest args)
-         (setq forwarded args))
-       :state state
-       :acp-request request)
-      (should (equal handled (list state request)))
-      (should (equal forwarded (list :state state :acp-request request))))))
+(ert-deftest agent-shell-attention--handle-event-permission-request-marks-buffer ()
+  (let ((buffer (generate-new-buffer " *asa-event-permission*"))
+        (message-text nil)
+        (marked nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (agent-shell-mode))
+          (cl-letf (((symbol-function 'agent-shell-attention--message)
+                     (lambda (_buffer text)
+                       (setq message-text text)))
+                    ((symbol-function 'agent-shell-attention--mark-buffer)
+                     (lambda (buf label &rest _args)
+                       (setq marked (list buf label)))))
+            (agent-shell-attention--handle-event
+             buffer
+             '((:event . permission-request)
+               (:data . ((:tool-call . ((:title . "write file")
+                                        (:kind . "execute")))))))
+            (should (equal message-text "Permission: write file (execute)"))
+            (should (equal marked
+                           (list buffer "Permission: write file (execute)")))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest agent-shell-attention--handle-event-turn-complete-clears-busy ()
+  (let ((buffer (generate-new-buffer " *asa-event-turn*"))
+        (cleared nil)
+        (handled nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (agent-shell-mode))
+          (cl-letf (((symbol-function 'agent-shell-attention--clear-busy)
+                     (lambda (buf)
+                       (setq cleared buf)))
+                    ((symbol-function 'agent-shell-attention--handle-success)
+                     (lambda (buf response)
+                       (setq handled (list buf response)))))
+            (agent-shell-attention--handle-event
+             buffer
+             '((:event . turn-complete)
+               (:data . ((:stop-reason . "end_turn"))))
+            )
+            (should (eq cleared buffer))
+            (should (equal handled
+                           (list buffer '((:stop-reason . "end_turn")))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest agent-shell-attention--subscribe-buffer-registers-once ()
+  (let ((buffer (generate-new-buffer " *asa-subscribe*"))
+        (agent-shell-attention--subscriptions (make-hash-table :test #'eq))
+        (calls 0))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (agent-shell-mode))
+          (cl-letf (((symbol-function 'agent-shell-subscribe-to)
+                     (lambda (&rest args)
+                       (setq calls (1+ calls))
+                       (should (eq (plist-get args :shell-buffer) buffer))
+                       'token-1)))
+            (agent-shell-attention--subscribe-buffer buffer)
+            (agent-shell-attention--subscribe-buffer buffer)
+            (should (= calls 1))
+            (should (eq (gethash buffer agent-shell-attention--subscriptions)
+                        'token-1))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (ert-deftest agent-shell-attention--dashboard-buffer-name-right-truncates ()
   (let ((agent-shell-attention-dashboard-buffer-column-width 12))
@@ -444,8 +553,8 @@
     (unwind-protect
         (progn
           (with-current-buffer busy-buf
-            (agent-shell-mode))
-          (puthash busy-buf 1 agent-shell-attention--busy)
+            (agent-shell-mode)
+            (setq agent-shell--state (list (cons :active-requests '(req)))))
           (puthash busy-buf 20.0 agent-shell-attention--busy-since)
           (puthash busy-buf
                    (list :status 'pending
