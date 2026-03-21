@@ -426,9 +426,17 @@ This call also purges stale entries for dead buffers."
     (and (window-live-p window)
          (eq buffer (window-buffer window)))))
 
+(defun agent-shell-attention--frame-focused-p ()
+  "Return non-nil if any Emacs frame currently has input focus."
+  (seq-some (lambda (frame)
+              (and (frame-live-p frame)
+                   (frame-focus-state frame)))
+            (frame-list)))
+
 (defun agent-shell-attention--should-notify-buffer (buffer)
   "Return non-nil when BUFFER warrants notifications or lighter updates."
-  (not (agent-shell-attention--buffer-selected-p buffer)))
+  (or (not (agent-shell-attention--buffer-selected-p buffer))
+      (not (agent-shell-attention--frame-focused-p))))
 
 (defun agent-shell-attention--awaiting-p (stop-reason)
   "Return non-nil when STOP-REASON should mark a buffer as awaiting input."
