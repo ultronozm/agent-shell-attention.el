@@ -1224,10 +1224,16 @@ Intercept completions to track buffers awaiting user input."
           (cl-letf* ((orig-request (symbol-function #'acp-send-request))
                      ((symbol-function #'acp-send-request)
                       (lambda (&rest request-args)
-                        (apply orig-request
-                               (agent-shell-attention--decorate-request
-                                buffer
-                                request-args)))))
+                        (prog1
+                            (apply orig-request
+                                   (agent-shell-attention--decorate-request
+                                    buffer
+                                    request-args))
+                          ;; `agent-shell--send-request' marks :active-requests
+                          ;; before calling `acp-send-request'.  Refresh once
+                          ;; more here so the dashboard can observe the new
+                          ;; running state immediately.
+                          (agent-shell-attention--maybe-refresh-dashboard)))))
             (apply orig-fn args))
         (error
          (agent-shell-attention--clear-busy buffer)

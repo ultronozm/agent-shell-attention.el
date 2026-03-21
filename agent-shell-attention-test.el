@@ -235,6 +235,41 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest agent-shell-attention--around-send-command-refreshes-dashboard-after-request-start ()
+  (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
+        (agent-shell-attention--busy (make-hash-table :test #'eq))
+        (buffer (generate-new-buffer " *asa-send-refresh*"))
+        (refreshes 0))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (agent-shell-mode))
+          (cl-letf (((symbol-function 'agent-shell-attention--clear-buffer)
+                     (lambda (_buffer) nil))
+                    ((symbol-function 'agent-shell-attention--mark-busy)
+                     (lambda (_buffer)
+                       (agent-shell-attention--maybe-refresh-dashboard)))
+                    ((symbol-function 'agent-shell-attention--maybe-refresh-dashboard)
+                     (lambda ()
+                       (setq refreshes (1+ refreshes))))
+                    ((symbol-function 'agent-shell-attention--decorate-request)
+                     (lambda (_buffer request-args)
+                       request-args))
+                    ((symbol-function 'acp-send-request)
+                     (lambda (&rest _request-args)
+                       'acp-ok))
+                    ((symbol-function 'fake-orig)
+                     (lambda (&rest _args)
+                       (acp-send-request :request 'dummy)
+                       'orig-ok)))
+            (should
+             (eq (agent-shell-attention--around-send-command
+                  #'fake-orig :prompt "hello" :shell-buffer buffer)
+                 'orig-ok))
+            (should (= refreshes 2))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest agent-shell-attention--decorate-request-wraps-success-and-failure ()
   (let ((buffer (generate-new-buffer " *asa-decorate*"))
         (success-called nil)
