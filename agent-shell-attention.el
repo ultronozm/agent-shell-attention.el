@@ -1213,7 +1213,6 @@ When FORCE is non-nil, mark the buffer even if it's currently selected."
           (plist-put request-args :on-success
                      (lambda (response)
                        (agent-shell-attention--clear-busy buffer)
-                       (agent-shell-attention--handle-success buffer response)
                        (when on-success
                          (funcall on-success response)))))
     (setq request-args
