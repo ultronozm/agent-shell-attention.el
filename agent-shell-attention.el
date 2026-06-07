@@ -47,6 +47,7 @@
 (declare-function agent-shell--send-command "agent-shell")
 (declare-function dired "dired" (&optional dirname switches))
 (declare-function acp-send-request "acp")
+(declare-function agent-shell-viewport--buffer "agent-shell-viewport")
 
 (defgroup agent-shell-attention nil
   "Mode-line tally and minibuffer notifications for agent-shell buffers."
@@ -666,11 +667,20 @@ CANDIDATES is an alist of (DISPLAY . (BUFFER . STATUS))."
         `((group-function . ,group)))))))
 
 (defun agent-shell-attention--jump-to-buffer (buffer)
-  "Switch to BUFFER, clearing pending state when appropriate."
+  "Switch to BUFFER, clearing pending state when appropriate.
+When `agent-shell-prefer-viewport-interaction' is non-nil and BUFFER
+has an existing viewport buffer, switch to the viewport instead."
   (when (buffer-live-p buffer)
     (unless (agent-shell-attention--permission-pending-p buffer)
       (agent-shell-attention--clear-buffer buffer))
-    (pop-to-buffer buffer agent-shell-attention-display-buffer-action)))
+    (let ((target (if (and (boundp 'agent-shell-prefer-viewport-interaction)
+                           agent-shell-prefer-viewport-interaction
+                           (fboundp 'agent-shell-viewport--buffer))
+                      (or (agent-shell-viewport--buffer
+                           :shell-buffer buffer :existing-only t)
+                          buffer)
+                    buffer)))
+      (pop-to-buffer target agent-shell-attention-display-buffer-action))))
 
 (defun agent-shell-attention--build-menu (entries)
   "Create popup menu for ENTRIES.
