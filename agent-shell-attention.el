@@ -374,6 +374,16 @@ entries for dead buffers."
    ((consp entry) (cdr entry))
    (t 0.0)))
 
+(defun agent-shell-attention--pending-entry-request-id (entry)
+  "Return the permission request id stored in ENTRY, if any."
+  (when (plistp entry)
+    (plist-get entry :request-id)))
+
+(defun agent-shell-attention--pending-entry-tool-call-id (entry)
+  "Return the permission tool call id stored in ENTRY, if any."
+  (when (plistp entry)
+    (plist-get entry :tool-call-id)))
+
 (defun agent-shell-attention--busy-live-buffers ()
   "Return a list of live buffers currently marked busy.
 
@@ -1101,7 +1111,8 @@ ACTIVE-COUNT is accepted for API compatibility but ignored."
                       nil)
                   (error nil))))))))))
 
-(cl-defun agent-shell-attention--mark-buffer (buffer label &key force)
+(cl-defun agent-shell-attention--mark-buffer
+    (buffer label &key force request-id tool-call-id)
   "Mark BUFFER as waiting for user input with LABEL description.
 
 When FORCE is non-nil, mark the buffer even if it's currently selected."
@@ -1115,7 +1126,14 @@ When FORCE is non-nil, mark the buffer even if it's currently selected."
             (with-current-buffer buffer
               (add-hook 'kill-buffer-hook
                         #'agent-shell-attention--on-buffer-killed nil t)))
-          (puthash buffer (cons label now) agent-shell-attention--pending))
+          (puthash buffer
+                   (if (or request-id tool-call-id)
+                       (list :label label
+                             :timestamp now
+                             :request-id request-id
+                             :tool-call-id tool-call-id)
+                     (cons label now))
+                   agent-shell-attention--pending))
         (agent-shell-attention--ensure-mode-line-entry)
         (force-mode-line-update t)
         (agent-shell-attention--maybe-refresh-dashboard)))))
@@ -1154,6 +1172,22 @@ When FORCE is non-nil, mark the buffer even if it's currently selected."
     (concat "Permission: " title
             (if kind (format " (%s)" kind) ""))))
 
+(defun agent-shell-attention--permission-response-matches-p (entry data)
+  "Return non-nil when permission response DATA answers pending ENTRY."
+  (let ((entry-request-id
+         (agent-shell-attention--pending-entry-request-id entry))
+        (entry-tool-call-id
+         (agent-shell-attention--pending-entry-tool-call-id entry))
+        (response-request-id (map-elt data :request-id))
+        (response-tool-call-id (map-elt data :tool-call-id)))
+    (and (or entry-request-id entry-tool-call-id)
+         (if entry-request-id
+             (equal entry-request-id response-request-id)
+           t)
+         (if entry-tool-call-id
+             (equal entry-tool-call-id response-tool-call-id)
+           t))))
+
 (defun agent-shell-attention--handle-event (buffer event)
   "Handle `agent-shell' EVENT for BUFFER."
   (let ((data (map-elt event :data)))
@@ -1163,10 +1197,16 @@ When FORCE is non-nil, mark the buffer even if it's currently selected."
                      (map-elt data :tool-call))))
          (when (agent-shell-attention--should-notify-buffer buffer)
            (agent-shell-attention--message buffer label))
-         (agent-shell-attention--mark-buffer buffer label :force t)))
+         (agent-shell-attention--mark-buffer
+          buffer label :force t
+          :request-id (map-elt data :request-id)
+          :tool-call-id (map-elt data :tool-call-id))))
       ('permission-response
-       (unless (agent-shell-attention--permission-pending-p buffer)
-         (agent-shell-attention--clear-buffer buffer))
+       (let ((entry (gethash buffer agent-shell-attention--pending)))
+         (when (or (agent-shell-attention--permission-response-matches-p
+                    entry data)
+                   (not (agent-shell-attention--permission-pending-p buffer)))
+           (agent-shell-attention--clear-buffer buffer)))
        (force-mode-line-update t)
        (agent-shell-attention--maybe-refresh-dashboard))
       ('turn-complete

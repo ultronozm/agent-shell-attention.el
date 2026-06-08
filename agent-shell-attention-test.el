@@ -12,6 +12,17 @@
 (define-derived-mode agent-shell-mode fundamental-mode "agent-shell")
 (defvar-local agent-shell--state nil)
 
+(defun agent-shell-attention-test--permission-state (request-id tool-call-id)
+  "Return test state with TOOL-CALL-ID awaiting permission REQUEST-ID."
+  (let ((state (make-hash-table :test #'eq))
+        (tool-calls (make-hash-table :test #'equal))
+        (tool-call (make-hash-table :test #'eq)))
+    (puthash :permission-request-id request-id tool-call)
+    (puthash :status "pending" tool-call)
+    (puthash tool-call-id tool-call tool-calls)
+    (puthash :tool-calls tool-calls state)
+    state))
+
 (ert-deftest agent-shell-attention--apply-indicator-location-handles-nonlists ()
   (let ((orig-default-mlmi (default-value 'mode-line-misc-info))
         (orig-default-gms (default-value 'global-mode-string)))
@@ -404,6 +415,104 @@
             (should (equal message-text "Permission: write file (execute)"))
             (should (equal marked
                            (list buffer "Permission: write file (execute)")))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest agent-shell-attention--handle-event-permission-request-stores-identity ()
+  (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
+        (buffer (generate-new-buffer " *asa-event-permission-id*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (agent-shell-mode))
+          (cl-letf (((symbol-function 'agent-shell-attention--message)
+                     (lambda (&rest _) nil)))
+            (agent-shell-attention--handle-event
+             buffer
+             '((:event . permission-request)
+               (:data . ((:request-id . "req-1")
+                         (:tool-call-id . "tool-1")
+                         (:tool-call . ((:title . "write file")
+                                        (:kind . "execute"))))))))
+          (let ((entry (gethash buffer agent-shell-attention--pending)))
+            (should (equal (agent-shell-attention--pending-entry-label entry)
+                           "Permission: write file (execute)"))
+            (should (equal (agent-shell-attention--pending-entry-request-id entry)
+                           "req-1"))
+            (should (equal (agent-shell-attention--pending-entry-tool-call-id entry)
+                           "tool-1"))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest agent-shell-attention--handle-event-permission-response-clears-matching-entry ()
+  (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
+        (buffer (generate-new-buffer " *asa-event-permission-clear*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (agent-shell-mode)
+            (setq agent-shell--state
+                  (agent-shell-attention-test--permission-state
+                   "req-2" "tool-2")))
+          (puthash buffer
+                   (list :label "Permission: old"
+                         :timestamp 1.0
+                         :request-id "req-1"
+                         :tool-call-id "tool-1")
+                   agent-shell-attention--pending)
+          (agent-shell-attention--handle-event
+           buffer
+           '((:event . permission-response)
+             (:data . ((:request-id . "req-1")
+                       (:tool-call-id . "tool-1")))))
+          (should-not (gethash buffer agent-shell-attention--pending)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest agent-shell-attention--handle-event-permission-response-keeps-newer-entry ()
+  (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
+        (buffer (generate-new-buffer " *asa-event-permission-keep*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (agent-shell-mode)
+            (setq agent-shell--state
+                  (agent-shell-attention-test--permission-state
+                   "req-2" "tool-2")))
+          (puthash buffer
+                   (list :label "Permission: new"
+                         :timestamp 2.0
+                         :request-id "req-2"
+                         :tool-call-id "tool-2")
+                   agent-shell-attention--pending)
+          (agent-shell-attention--handle-event
+           buffer
+           '((:event . permission-response)
+             (:data . ((:request-id . "req-1")
+                       (:tool-call-id . "tool-1")))))
+          (let ((entry (gethash buffer agent-shell-attention--pending)))
+            (should entry)
+            (should (equal (agent-shell-attention--pending-entry-label entry)
+                           "Permission: new"))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest agent-shell-attention--handle-event-permission-response-clears-legacy-entry ()
+  (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
+        (buffer (generate-new-buffer " *asa-event-permission-legacy*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (agent-shell-mode)
+            (setq agent-shell--state (make-hash-table :test #'eq)))
+          (puthash buffer (cons "Permission: old" 1.0)
+                   agent-shell-attention--pending)
+          (agent-shell-attention--handle-event
+           buffer
+           '((:event . permission-response)
+             (:data . ((:request-id . "req-1")
+                       (:tool-call-id . "tool-1")))))
+          (should-not (gethash buffer agent-shell-attention--pending)))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
