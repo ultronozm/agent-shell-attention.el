@@ -182,6 +182,9 @@ Values are plists with keys :status, :summary, and :timestamp.")
 (defvar agent-shell-attention--subscriptions (make-hash-table :test #'eq)
   "Table mapping `agent-shell-mode' buffers to event subscription tokens.")
 
+(defvar agent-shell-attention--dashboard-preserve-row nil
+  "When non-nil, dashboard refreshes keep the same visual row.")
+
 ;;; Mode-line
 
 (defcustom agent-shell-attention-render-function
@@ -510,6 +513,7 @@ TIMESTAMP defaults to current time."
 (defun agent-shell-attention--on-buffer-killed ()
   "Buffer-local hook to keep tracking tables tidy."
   (let ((buffer (current-buffer))
+        (dashboard-relevant-p (derived-mode-p 'agent-shell-mode))
         (changed nil))
     (agent-shell-attention--unsubscribe-buffer buffer)
     (when (gethash buffer agent-shell-attention--pending)
@@ -525,8 +529,9 @@ TIMESTAMP defaults to current time."
       (remhash buffer agent-shell-attention--last-event)
       (setq changed t))
     (when changed
-      (force-mode-line-update t)
-      (agent-shell-attention--maybe-refresh-dashboard))))
+      (force-mode-line-update t))
+    (when (or changed dashboard-relevant-p)
+      (agent-shell-attention--schedule-dashboard-refresh))))
 
 (defun agent-shell-attention--clear-buffer (buffer)
   "Remove BUFFER from the pending table and refresh the mode line."
@@ -867,36 +872,140 @@ visible, then right-aligned by tabulated-list."
               (plist-get record :status-text)))))
    records))
 
-(defun agent-shell-attention--maybe-refresh-dashboard ()
-  "Refresh dashboard buffer when it is currently open."
-  (let ((buffer (get-buffer agent-shell-attention-dashboard-buffer-name)))
-    (when (buffer-live-p buffer)
+(defun agent-shell-attention--dashboard-current-row-index ()
+  "Return the zero-based dashboard row index at point, or nil."
+  (when (tabulated-list-get-id)
+    (count-lines (point-min) (line-beginning-position))))
+
+(defun agent-shell-attention--dashboard-position-state (&optional position)
+  "Return dashboard row state at POSITION, or point when POSITION is nil."
+  (save-excursion
+    (when position
+      (goto-char position))
+    (when-let* ((id (tabulated-list-get-id)))
+      (list :id id
+            :row (agent-shell-attention--dashboard-current-row-index)
+            :column (current-column)))))
+
+(defun agent-shell-attention--dashboard-entry-present-p (id entries)
+  "Return non-nil when ID appears in tabulated list ENTRIES."
+  (cl-some (lambda (entry)
+             (eq (car entry) id))
+           entries))
+
+(defun agent-shell-attention--dashboard-goto-entry-id (id)
+  "Move point to dashboard entry ID and return non-nil if found."
+  (goto-char (point-min))
+  (catch 'found
+    (while (not (eobp))
+      (when (eq (tabulated-list-get-id) id)
+        (throw 'found t))
+      (forward-line 1))
+    nil))
+
+(defun agent-shell-attention--dashboard-goto-row-index (index column)
+  "Move point to dashboard row INDEX and preserve COLUMN when possible."
+  (goto-char (point-min))
+  (forward-line (max 0 index))
+  (while (and (not (bobp))
+              (not (tabulated-list-get-id)))
+    (forward-line -1))
+  (when (tabulated-list-get-id)
+    (move-to-column column)))
+
+(defun agent-shell-attention--dashboard-position-for-state (state entries)
+  "Return buffer position for dashboard STATE after refresh to ENTRIES."
+  (when state
+    (let ((id (plist-get state :id))
+          (row (plist-get state :row))
+          (column (plist-get state :column)))
+      (save-excursion
+        (cond
+         ((and id
+               (not agent-shell-attention--dashboard-preserve-row)
+               (agent-shell-attention--dashboard-entry-present-p id entries)
+               (agent-shell-attention--dashboard-goto-entry-id id))
+          (move-to-column column)
+          (point))
+         ((and row entries)
+          (agent-shell-attention--dashboard-goto-row-index
+           (min row (1- (length entries)))
+           column)
+          (when (tabulated-list-get-id)
+            (point))))))))
+
+(defun agent-shell-attention--dashboard-visible-window-states (buffer)
+  "Return dashboard position state for live windows displaying BUFFER."
+  (delq nil
+        (mapcar
+         (lambda (window)
+           (when (window-live-p window)
+             (with-current-buffer buffer
+               (when-let* ((state (agent-shell-attention--dashboard-position-state
+                                   (window-point window))))
+                 (plist-put state :window window)))))
+         (get-buffer-window-list buffer nil t))))
+
+(defun agent-shell-attention--dashboard-restore-window-points (states entries)
+  "Restore dashboard window STATES after refresh to ENTRIES."
+  (dolist (state states)
+    (when-let* ((window (plist-get state :window))
+                (_ (window-live-p window))
+                (position (agent-shell-attention--dashboard-position-for-state
+                           state entries)))
+      (set-window-point window position))))
+
+(defun agent-shell-attention--refresh-dashboard-buffer (buffer)
+  "Refresh dashboard BUFFER when it is still live."
+  (when (buffer-live-p buffer)
+    (let ((window-states
+           (agent-shell-attention--dashboard-visible-window-states buffer)))
       (with-current-buffer buffer
         (when (derived-mode-p 'agent-shell-attention-dashboard-mode)
-          (agent-shell-attention-dashboard-refresh))))))
+          (agent-shell-attention-dashboard-refresh)
+          (agent-shell-attention--dashboard-restore-window-points
+           window-states tabulated-list-entries))))))
+
+(defun agent-shell-attention--schedule-dashboard-refresh ()
+  "Refresh the dashboard after the current buffer lifecycle change settles."
+  (when-let* ((buffer (get-buffer agent-shell-attention-dashboard-buffer-name)))
+    (run-at-time 0 nil
+                 #'agent-shell-attention--refresh-dashboard-buffer
+                 buffer)))
+
+(defun agent-shell-attention--maybe-refresh-dashboard ()
+  "Refresh dashboard buffer when it is currently open."
+  (when-let* ((buffer (get-buffer agent-shell-attention-dashboard-buffer-name)))
+    (agent-shell-attention--refresh-dashboard-buffer buffer)))
 
 (defun agent-shell-attention-dashboard-refresh ()
   "Refresh the agent-shell attention dashboard."
   (interactive)
-  (let ((records (agent-shell-attention--dashboard-records)))
+  (let* ((old-state (agent-shell-attention--dashboard-position-state))
+         (records (agent-shell-attention--dashboard-records))
+         (entries (agent-shell-attention--dashboard-entries records)))
     (setq header-line-format (agent-shell-attention--dashboard-header-line records))
-    (setq tabulated-list-entries
-          (agent-shell-attention--dashboard-entries records))
-    (tabulated-list-print t)))
+    (setq tabulated-list-entries entries)
+    (tabulated-list-print (not agent-shell-attention--dashboard-preserve-row))
+    (when-let* ((position (agent-shell-attention--dashboard-position-for-state
+                           old-state entries)))
+      (goto-char position))))
 
 (defun agent-shell-attention-dashboard-visit ()
   "Visit agent-shell buffer on current dashboard row."
   (interactive)
   (when-let* ((buffer (agent-shell-attention-dashboard--selected-live-buffer)))
-    (agent-shell-attention--jump-to-buffer buffer)))
+    (let ((agent-shell-attention--dashboard-preserve-row t))
+      (agent-shell-attention--jump-to-buffer buffer))))
 
 (defun agent-shell-attention-dashboard-visit-other-window ()
   "Visit agent-shell buffer on current dashboard row in another window."
   (interactive)
   (when-let* ((buffer (agent-shell-attention-dashboard--selected-live-buffer)))
-    (unless (agent-shell-attention--permission-pending-p buffer)
-      (agent-shell-attention--clear-buffer buffer))
-    (switch-to-buffer-other-window buffer)))
+    (let ((agent-shell-attention--dashboard-preserve-row t))
+      (unless (agent-shell-attention--permission-pending-p buffer)
+        (agent-shell-attention--clear-buffer buffer))
+      (switch-to-buffer-other-window buffer))))
 
 (defun agent-shell-attention-dashboard-open-ambient-directory ()
   "Open dashboard row buffer's ambient directory in Dired."

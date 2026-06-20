@@ -630,6 +630,49 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest agent-shell-attention-dashboard-visit-other-window-keeps-row ()
+  (let* ((agent-shell-attention--pending (make-hash-table :test #'eq))
+         (agent-shell-attention--busy (make-hash-table :test #'eq))
+         (agent-shell-attention--busy-since (make-hash-table :test #'eq))
+         (agent-shell-attention--last-event (make-hash-table :test #'eq))
+         (agent-shell-attention-dashboard-buffer-name
+          " *asa-dashboard-visit-other-window-dashboard*")
+         (first (generate-new-buffer " *asa-dashboard-visit-a*"))
+         (second (generate-new-buffer " *asa-dashboard-visit-b*"))
+         (dashboard (get-buffer-create agent-shell-attention-dashboard-buffer-name))
+         (visited nil))
+    (unwind-protect
+        (progn
+          (dolist (buffer (list first second))
+            (with-current-buffer buffer
+              (agent-shell-mode)))
+          (puthash first (cons "Finished" 20.0)
+                   agent-shell-attention--pending)
+          (puthash first (list :status 'pending
+                               :summary "Finished"
+                               :timestamp 20.0)
+                   agent-shell-attention--last-event)
+          (puthash second (cons "Finished" 10.0)
+                   agent-shell-attention--pending)
+          (puthash second (list :status 'pending
+                                :summary "Finished"
+                                :timestamp 10.0)
+                   agent-shell-attention--last-event)
+          (with-current-buffer dashboard
+            (agent-shell-attention-dashboard-mode)
+            (agent-shell-attention-dashboard-refresh)
+            (goto-char (point-min))
+            (should (eq (tabulated-list-get-id) first))
+            (cl-letf (((symbol-function 'switch-to-buffer-other-window)
+                       (lambda (buffer &optional _norecord)
+                         (setq visited buffer))))
+              (agent-shell-attention-dashboard-visit-other-window))
+            (should (eq visited first))
+            (should (eq (tabulated-list-get-id) second))))
+      (dolist (buffer (list first second dashboard))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest agent-shell-attention-dashboard-open-ambient-directory-uses-buffer-directory ()
   (let ((buffer (generate-new-buffer " *asa-dashboard-ambient*"))
         (opened-dir nil))
@@ -647,6 +690,40 @@
             (should (equal opened-dir "/tmp/"))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
+
+(ert-deftest agent-shell-attention-dashboard-refresh-keeps-nearby-row-after-delete ()
+  (let* ((agent-shell-attention--pending (make-hash-table :test #'eq))
+         (agent-shell-attention--busy (make-hash-table :test #'eq))
+         (agent-shell-attention--busy-since (make-hash-table :test #'eq))
+         (agent-shell-attention--last-event (make-hash-table :test #'eq))
+         (first (generate-new-buffer " *asa-dashboard-row-a*"))
+         (second (generate-new-buffer " *asa-dashboard-row-b*"))
+         (third (generate-new-buffer " *asa-dashboard-row-c*")))
+    (unwind-protect
+        (progn
+          (dolist (buffer (list first second third))
+            (with-current-buffer buffer
+              (agent-shell-mode)))
+          (puthash first (cons "Finished" 30.0)
+                   agent-shell-attention--pending)
+          (puthash second (cons "Finished" 20.0)
+                   agent-shell-attention--pending)
+          (puthash third (cons "Finished" 10.0)
+                   agent-shell-attention--pending)
+          (with-temp-buffer
+            (agent-shell-attention-dashboard-mode)
+            (agent-shell-attention-dashboard-refresh)
+            (should (= (length tabulated-list-entries) 3))
+            (goto-char (point-min))
+            (forward-line 1)
+            (should (eq (tabulated-list-get-id) second))
+            (kill-buffer second)
+            (agent-shell-attention-dashboard-refresh)
+            (should (= (length tabulated-list-entries) 2))
+            (should (eq (tabulated-list-get-id) third))))
+      (dolist (buffer (list first second third))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
 
 (ert-deftest agent-shell-attention-dashboard-kill-session-kills-selected-buffer ()
   (let ((buffer (generate-new-buffer " *asa-dashboard-kill*"))
@@ -667,6 +744,103 @@
             (should refreshed)))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
+
+(ert-deftest agent-shell-attention--on-buffer-killed-refreshes-dashboard-after-kill ()
+  (let* ((agent-shell-attention--pending (make-hash-table :test #'eq))
+         (agent-shell-attention--busy (make-hash-table :test #'eq))
+         (agent-shell-attention--busy-since (make-hash-table :test #'eq))
+         (agent-shell-attention--last-event (make-hash-table :test #'eq))
+         (agent-shell-attention--subscriptions (make-hash-table :test #'eq))
+         (agent-shell-attention-dashboard-buffer-name
+          " *asa-dashboard-after-kill-dashboard*")
+         (killed (generate-new-buffer " *asa-dashboard-after-kill-a*"))
+         (remaining (generate-new-buffer " *asa-dashboard-after-kill-b*"))
+         (dashboard (get-buffer-create agent-shell-attention-dashboard-buffer-name)))
+    (unwind-protect
+        (progn
+          (dolist (buffer (list killed remaining))
+            (with-current-buffer buffer
+              (agent-shell-mode)))
+          (puthash killed (cons "Finished" 20.0)
+                   agent-shell-attention--pending)
+          (puthash killed (list :status 'pending
+                                :summary "Finished"
+                                :timestamp 20.0)
+                   agent-shell-attention--last-event)
+          (puthash remaining (cons "Finished" 10.0)
+                   agent-shell-attention--pending)
+          (puthash remaining (list :status 'pending
+                                   :summary "Finished"
+                                   :timestamp 10.0)
+                   agent-shell-attention--last-event)
+          (with-current-buffer killed
+            (add-hook 'kill-buffer-hook
+                      #'agent-shell-attention--on-buffer-killed nil t))
+          (with-current-buffer dashboard
+            (agent-shell-attention-dashboard-mode)
+            (agent-shell-attention-dashboard-refresh)
+            (goto-char (point-min))
+            (should (eq (tabulated-list-get-id) killed)))
+          (kill-buffer killed)
+          (sit-for 0.01)
+          (with-current-buffer dashboard
+            (should-not (assoc killed tabulated-list-entries))
+            (should (eq (tabulated-list-get-id) remaining))))
+      (dolist (buffer (list killed remaining dashboard))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest agent-shell-attention--on-buffer-killed-preserves-dashboard-window-point ()
+  (let* ((agent-shell-attention--pending (make-hash-table :test #'eq))
+         (agent-shell-attention--busy (make-hash-table :test #'eq))
+         (agent-shell-attention--busy-since (make-hash-table :test #'eq))
+         (agent-shell-attention--last-event (make-hash-table :test #'eq))
+         (agent-shell-attention--subscriptions (make-hash-table :test #'eq))
+         (agent-shell-attention-dashboard-buffer-name
+          " *asa-dashboard-window-point-dashboard*")
+         (first (generate-new-buffer " *asa-dashboard-window-point-a*"))
+         (killed (generate-new-buffer " *asa-dashboard-window-point-b*"))
+         (third (generate-new-buffer " *asa-dashboard-window-point-c*"))
+         (dashboard (get-buffer-create agent-shell-attention-dashboard-buffer-name)))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (dolist (buffer (list first killed third))
+            (with-current-buffer buffer
+              (agent-shell-mode)))
+          (puthash first (cons "Finished" 30.0)
+                   agent-shell-attention--pending)
+          (puthash killed (cons "Finished" 20.0)
+                   agent-shell-attention--pending)
+          (puthash third (cons "Finished" 10.0)
+                   agent-shell-attention--pending)
+          (with-current-buffer killed
+            (add-hook 'kill-buffer-hook
+                      #'agent-shell-attention--on-buffer-killed nil t))
+          (switch-to-buffer dashboard)
+          (agent-shell-attention-dashboard-mode)
+          (agent-shell-attention-dashboard-refresh)
+          (let* ((dashboard-window (selected-window))
+                 (agent-window (split-window-right)))
+            (goto-char (point-min))
+            (forward-line 1)
+            (should (eq (tabulated-list-get-id) killed))
+            (set-window-point dashboard-window (point))
+            (select-window agent-window)
+            (switch-to-buffer killed)
+            (with-current-buffer dashboard
+              (goto-char (point-min)))
+            (kill-buffer killed)
+            (sit-for 0.01)
+            (with-current-buffer dashboard
+              (should-not (assoc killed tabulated-list-entries))
+              (should (= (length tabulated-list-entries) 2))
+              (save-excursion
+                (goto-char (window-point dashboard-window))
+                (should (eq (tabulated-list-get-id) third))))))
+      (dolist (buffer (list first killed third dashboard))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
 
 (ert-deftest agent-shell-attention--state-change-hooks-refresh-dashboard ()
   (let* ((agent-shell-attention--pending (make-hash-table :test #'eq))
