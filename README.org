@@ -2,6 +2,12 @@
 
 Small add-on for [[https://github.com/xenodium/agent-shell][agent-shell]] that keeps track of which agent buffers are waiting for your input and shows a compact indicator in the mode line.
 
+* Installation
+
+Install =agent-shell-attention= from this repository with your preferred
+package manager, or place =agent-shell-attention.el= on your =load-path= and
+require it.  The example configuration below shows one Elpaca setup.
+
 * Usage
 
 Enable the global minor mode:
