@@ -48,6 +48,7 @@
 (declare-function dired "dired" (&optional dirname switches))
 (declare-function acp-send-request "acp")
 (declare-function agent-shell-viewport--buffer "agent-shell-viewport")
+(declare-function agent-shell-viewport--shell-buffer "agent-shell-viewport")
 
 (defgroup agent-shell-attention nil
   "Mode-line tally and minibuffer notifications for agent-shell buffers."
@@ -435,10 +436,16 @@ This call also purges stale entries for dead buffers."
     count))
 
 (defun agent-shell-attention--buffer-selected-p (buffer)
-  "Return non-nil if BUFFER is currently shown in the selected window."
+  "Return non-nil if BUFFER is currently shown in the selected window.
+A viewport buffer belonging to BUFFER counts as BUFFER, so
+interacting with a session through its viewport suppresses
+notifications the same way the shell buffer itself does."
   (let ((window (selected-window)))
     (and (window-live-p window)
-         (eq buffer (window-buffer window)))))
+         (or (eq buffer (window-buffer window))
+             (and (fboundp 'agent-shell-viewport--shell-buffer)
+                  (eq buffer (agent-shell-viewport--shell-buffer
+                              (window-buffer window))))))))
 
 (defun agent-shell-attention--frame-focused-p ()
   "Return non-nil if any Emacs frame currently has input focus."
