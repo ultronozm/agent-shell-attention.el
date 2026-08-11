@@ -48,6 +48,7 @@
 (declare-function dired "dired" (&optional dirname switches))
 (declare-function acp-send-request "acp")
 (declare-function agent-shell-viewport--buffer "agent-shell-viewport")
+(declare-function agent-shell-viewport--shell-buffer "agent-shell-viewport")
 
 (defgroup agent-shell-attention nil
   "Mode-line tally and minibuffer notifications for agent-shell buffers."
@@ -435,10 +436,16 @@ This call also purges stale entries for dead buffers."
     count))
 
 (defun agent-shell-attention--buffer-selected-p (buffer)
-  "Return non-nil if BUFFER is currently shown in the selected window."
+  "Return non-nil if BUFFER is currently shown in the selected window.
+A viewport buffer belonging to BUFFER counts as BUFFER, so
+interacting with a session through its viewport suppresses
+notifications the same way the shell buffer itself does."
   (let ((window (selected-window)))
     (and (window-live-p window)
-         (eq buffer (window-buffer window)))))
+         (or (eq buffer (window-buffer window))
+             (and (fboundp 'agent-shell-viewport--shell-buffer)
+                  (eq buffer (agent-shell-viewport--shell-buffer
+                              (window-buffer window))))))))
 
 (defun agent-shell-attention--frame-focused-p ()
   "Return non-nil if any Emacs frame currently has input focus."
@@ -551,12 +558,16 @@ TIMESTAMP defaults to current time."
       (agent-shell-attention--maybe-refresh-dashboard))))
 
 (defun agent-shell-attention--maybe-clear-current ()
-  "Clear the currently selected buffer if it no longer needs attention."
-  (when (derived-mode-p 'agent-shell-mode)
-    (let ((permissions (agent-shell-attention--permission-pending-p (current-buffer))))
-      ;; Clear as soon as no outstanding permissions remain.
-      (unless permissions
-        (agent-shell-attention--clear-buffer (current-buffer))))))
+  "Clear the currently selected buffer if it no longer needs attention.
+A selected viewport buffer counts as its session's shell buffer."
+  (when-let* ((buffer (cond ((derived-mode-p 'agent-shell-mode)
+                             (current-buffer))
+                            ((fboundp 'agent-shell-viewport--shell-buffer)
+                             (agent-shell-viewport--shell-buffer
+                              (current-buffer))))))
+    ;; Clear as soon as no outstanding permissions remain.
+    (unless (agent-shell-attention--permission-pending-p buffer)
+      (agent-shell-attention--clear-buffer buffer))))
 
 ;;; Navigation UI
 

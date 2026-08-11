@@ -42,6 +42,91 @@
     (kill-buffer buffer)
     (should-not (agent-shell-attention--message buffer "hi"))))
 
+(ert-deftest agent-shell-attention--buffer-selected-p-counts-viewport ()
+  "A session's viewport buffer in the selected window counts as selected."
+  (let ((shell (generate-new-buffer "*asa-viewport-shell*"))
+        (viewport (generate-new-buffer "*asa-viewport-shell* [viewport]"))
+        (other (generate-new-buffer "*asa-other-shell* [viewport]"))
+        (before (window-buffer (selected-window))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-shell-viewport--shell-buffer)
+                   (lambda (&optional buffer)
+                     (let ((name (buffer-name (or buffer (current-buffer)))))
+                       (when (string-suffix-p " [viewport]" name)
+                         (get-buffer
+                          (substring name 0 (- (length name)
+                                               (length " [viewport]")))))))))
+          (set-window-buffer (selected-window) shell)
+          (should (agent-shell-attention--buffer-selected-p shell))
+          (set-window-buffer (selected-window) viewport)
+          (should (agent-shell-attention--buffer-selected-p shell))
+          (set-window-buffer (selected-window) other)
+          (should-not (agent-shell-attention--buffer-selected-p shell)))
+      (set-window-buffer (selected-window) before)
+      (kill-buffer shell)
+      (kill-buffer viewport)
+      (kill-buffer other))))
+
+(defun agent-shell-attention-test--viewport-resolver (&optional buffer)
+  "Stub of `agent-shell-viewport--shell-buffer' using the name suffix."
+  (let ((name (buffer-name (or buffer (current-buffer)))))
+    (when (string-suffix-p " [viewport]" name)
+      (get-buffer (substring name 0 (- (length name)
+                                       (length " [viewport]")))))))
+
+(ert-deftest agent-shell-attention--maybe-clear-current-clears-via-viewport ()
+  "Selecting a session's viewport clears the session's pending flag."
+  (let ((shell (generate-new-buffer "*asa-clear-shell*"))
+        (viewport (generate-new-buffer "*asa-clear-shell* [viewport]")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-shell-viewport--shell-buffer)
+                   #'agent-shell-attention-test--viewport-resolver))
+          (with-current-buffer shell (agent-shell-mode))
+          (puthash shell (cons "Needs input" (float-time))
+                   agent-shell-attention--pending)
+          (with-current-buffer viewport
+            (agent-shell-attention--maybe-clear-current))
+          (should-not (gethash shell agent-shell-attention--pending)))
+      (remhash shell agent-shell-attention--pending)
+      (kill-buffer shell)
+      (kill-buffer viewport))))
+
+(ert-deftest agent-shell-attention--maybe-clear-current-keeps-pending-permission ()
+  "A viewport visit must not clear a session awaiting permission."
+  (let ((shell (generate-new-buffer "*asa-clear-perm*"))
+        (viewport (generate-new-buffer "*asa-clear-perm* [viewport]")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-shell-viewport--shell-buffer)
+                   #'agent-shell-attention-test--viewport-resolver))
+          (with-current-buffer shell
+            (agent-shell-mode)
+            (setq agent-shell--state
+                  (agent-shell-attention-test--permission-state "req-1" "tc-1")))
+          (puthash shell (cons "Permission: write" (float-time))
+                   agent-shell-attention--pending)
+          (with-current-buffer viewport
+            (agent-shell-attention--maybe-clear-current))
+          (should (gethash shell agent-shell-attention--pending)))
+      (remhash shell agent-shell-attention--pending)
+      (kill-buffer shell)
+      (kill-buffer viewport))))
+
+(ert-deftest agent-shell-attention--buffer-selected-p-without-viewport-library ()
+  "Without agent-shell-viewport loaded, only the shell buffer counts."
+  (should-not (fboundp 'agent-shell-viewport--shell-buffer))
+  (let ((shell (generate-new-buffer "*asa-plain-shell*"))
+        (viewport (generate-new-buffer "*asa-plain-shell* [viewport]"))
+        (before (window-buffer (selected-window))))
+    (unwind-protect
+        (progn
+          (set-window-buffer (selected-window) shell)
+          (should (agent-shell-attention--buffer-selected-p shell))
+          (set-window-buffer (selected-window) viewport)
+          (should-not (agent-shell-attention--buffer-selected-p shell)))
+      (set-window-buffer (selected-window) before)
+      (kill-buffer shell)
+      (kill-buffer viewport))))
+
 (ert-deftest agent-shell-attention--permission-pending-p-robustness ()
   (let ((buffer (generate-new-buffer " *asa-perm*")))
     (unwind-protect
