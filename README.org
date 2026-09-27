@@ -28,6 +28,18 @@ When one or more agent buffers need attention, an =AS:n= indicator appears in th
 
 "Awaiting reply" prompts clear when you visit the buffer, while "tool permission" prompts remain pending until you actually respond.
 
+The indicator renders a cached count snapshot, so redisplay does not scan
+buffers.  State changes schedule a coalesced update after callbacks finish.
+While the mode is enabled, a one-second timer also reconciles the counts
+against subscribed agent buffers to catch requests made outside the
+command hooks.  Requests detected this way may take up to one second to
+appear in the indicator.  Navigation and dashboard commands query live
+state directly.
+Reconciliation also refreshes an open dashboard when buffer membership
+changes, even if the indicator counts stay the same.  If a background
+update fails, the last successful counts remain visible and the failure
+is reported once until an update succeeds.
+
 * Basic customization
 
 Bind the jump command globally:

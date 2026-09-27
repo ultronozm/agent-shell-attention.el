@@ -272,12 +272,63 @@ PENDING-COUNT and ACTIVE-COUNT are passed to the renderer."
      (message "agent-shell-attention render error: %s" err)
      "")))
 
+(defvar agent-shell-attention--indicator-counts '(0 . 0)
+  "Snapshot of (PENDING-COUNT . ACTIVE-COUNT) for redisplay.")
+
+(defvar agent-shell-attention--indicator-timer nil
+  "Timer reconciling indicator counts with live request state.")
+
+(defvar agent-shell-attention--indicator-update-timer nil
+  "Timer coalescing indicator updates after state changes.")
+
+(defvar agent-shell-attention--indicator-error-reported nil
+  "Non-nil when an indicator update failure has already been reported.")
+
+(defvar agent-shell-attention--reconciled-state-changed nil
+  "Non-nil when live-state reconciliation requires a dashboard refresh.
+Keep this set until a successful update, including across failed polls.")
+
+(defvar agent-shell-attention-mode)
+
 (defun agent-shell-attention--indicator ()
-  "Return the rendered indicator for pending agent shells."
-  (let* ((entries (agent-shell-attention--pending-live-entries))
-         (count (length entries))
-         (active-count (agent-shell-attention--compute-active-count count)))
-    (agent-shell-attention--call-renderer count active-count)))
+  "Render the last count snapshot without inspecting other buffers."
+  (agent-shell-attention--call-renderer
+   (car agent-shell-attention--indicator-counts)
+   (cdr agent-shell-attention--indicator-counts)))
+
+(defun agent-shell-attention--update-indicator ()
+  "Refresh indicator counts outside redisplay.
+Only inspect subscribed agent buffers, not the entire buffer list."
+  (when (timerp agent-shell-attention--indicator-update-timer)
+    (cancel-timer agent-shell-attention--indicator-update-timer))
+  (setq agent-shell-attention--indicator-update-timer nil)
+  (when agent-shell-attention-mode
+    (let ((previous-counts agent-shell-attention--indicator-counts))
+      (condition-case err
+          (let* ((pending (length (agent-shell-attention--pending-live-entries)))
+                 (active (agent-shell-attention--compute-active-count pending t)))
+            ;; Membership can change even when the counts stay the same.
+            (when agent-shell-attention--reconciled-state-changed
+              (agent-shell-attention--maybe-refresh-dashboard))
+            (unless (and (= pending (car previous-counts))
+                         (= active (cdr previous-counts)))
+              (setq agent-shell-attention--indicator-counts (cons pending active))
+              (force-mode-line-update t))
+            (setq agent-shell-attention--reconciled-state-changed nil
+                  agent-shell-attention--indicator-error-reported nil))
+        (error
+         (setq agent-shell-attention--indicator-counts previous-counts)
+         (unless agent-shell-attention--indicator-error-reported
+           (setq agent-shell-attention--indicator-error-reported t)
+           (message "agent-shell-attention indicator update failed: %s"
+                    (error-message-string err))))))))
+
+(defun agent-shell-attention--schedule-indicator-update ()
+  "Coalesce state changes into one indicator update after callbacks finish."
+  (when (and agent-shell-attention-mode
+             (not agent-shell-attention--indicator-update-timer))
+    (setq agent-shell-attention--indicator-update-timer
+          (run-at-time 0 nil #'agent-shell-attention--update-indicator))))
 
 (defvar agent-shell-attention-mode-line-construct
   '(:eval (agent-shell-attention--indicator))
@@ -366,6 +417,7 @@ entries for dead buffers."
                  (push buffer stale)))
              agent-shell-attention--pending)
     (dolist (buffer stale)
+      (setq agent-shell-attention--reconciled-state-changed t)
       (remhash buffer agent-shell-attention--pending)
       (remhash buffer agent-shell-attention--busy)
       (remhash buffer agent-shell-attention--busy-since)
@@ -396,32 +448,39 @@ entries for dead buffers."
   (when (plistp entry)
     (plist-get entry :tool-call-id)))
 
-(defun agent-shell-attention--busy-live-buffers ()
+(defun agent-shell-attention--busy-live-buffers (&optional subscribed-only)
   "Return a list of live buffers currently marked busy.
 
-This call also purges stale entries for dead buffers."
+This call also purges stale entries for dead buffers.
+When SUBSCRIBED-ONLY is non-nil, discover busy buffers using the event
+subscriptions rather than scanning every Emacs buffer."
   (let ((buffers nil)
         (seen (make-hash-table :test #'eq)))
     (maphash (lambda (buffer _count)
                (if (buffer-live-p buffer)
                    (progn
                      (unless (agent-shell-attention--buffer-busy-p buffer)
+                       (setq agent-shell-attention--reconciled-state-changed t)
                        (remhash buffer agent-shell-attention--busy)
                        (remhash buffer agent-shell-attention--busy-since))
                      (when (agent-shell-attention--buffer-busy-p buffer)
                        (puthash buffer t seen)
                        (push buffer buffers)))
+                 (setq agent-shell-attention--reconciled-state-changed t)
                  (remhash buffer agent-shell-attention--busy)
                  (remhash buffer agent-shell-attention--busy-since)
                  (remhash buffer agent-shell-attention--pending)
                  (remhash buffer agent-shell-attention--last-event)))
              agent-shell-attention--busy)
-    (dolist (buffer (agent-shell-attention--live-agent-shell-buffers))
+    (dolist (buffer (if subscribed-only
+                       (hash-table-keys agent-shell-attention--subscriptions)
+                     (agent-shell-attention--live-agent-shell-buffers)))
       (when (and (agent-shell-attention--buffer-busy-p buffer)
                  (not (gethash buffer seen)))
         (unless (gethash buffer agent-shell-attention--busy-since)
           (puthash buffer (float-time) agent-shell-attention--busy-since))
         (puthash buffer 1 agent-shell-attention--busy)
+        (setq agent-shell-attention--reconciled-state-changed t)
         (push buffer buffers)))
     (nreverse buffers)))
 
@@ -435,10 +494,11 @@ This call also purges stale entries for dead buffers."
           (and state
                (map-elt state :active-requests)))))))
 
-(defun agent-shell-attention--compute-active-count (pending-count)
-  "Return number of unique buffers that are pending or busy."
+(defun agent-shell-attention--compute-active-count (pending-count &optional subscribed-only)
+  "Return number of unique buffers that are pending or busy.
+Pass SUBSCRIBED-ONLY to `agent-shell-attention--busy-live-buffers'."
   (let ((count pending-count))
-    (dolist (buffer (agent-shell-attention--busy-live-buffers))
+    (dolist (buffer (agent-shell-attention--busy-live-buffers subscribed-only))
       (unless (gethash buffer agent-shell-attention--pending)
         (setq count (1+ count))))
     count))
@@ -543,9 +603,8 @@ TIMESTAMP defaults to current time."
     (when (gethash buffer agent-shell-attention--last-event)
       (remhash buffer agent-shell-attention--last-event)
       (setq changed t))
-    (when changed
-      (force-mode-line-update t))
     (when (or changed dashboard-relevant-p)
+      (agent-shell-attention--schedule-indicator-update)
       (agent-shell-attention--schedule-dashboard-refresh))))
 
 (defun agent-shell-attention--clear-buffer (buffer)
@@ -562,7 +621,7 @@ TIMESTAMP defaults to current time."
         (remove-hook 'kill-buffer-hook
                      #'agent-shell-attention--on-buffer-killed t)))
     (when had-pending
-      (force-mode-line-update t)
+      (agent-shell-attention--schedule-indicator-update)
       (agent-shell-attention--maybe-refresh-dashboard))))
 
 (defun agent-shell-attention--maybe-clear-current ()
@@ -1192,7 +1251,7 @@ ACTIVE-COUNT is accepted for API compatibility but ignored."
       (add-hook 'kill-buffer-hook
                 #'agent-shell-attention--on-buffer-killed nil t))
     (agent-shell-attention--ensure-mode-line-entry)
-    (force-mode-line-update t)
+    (agent-shell-attention--schedule-indicator-update)
     (agent-shell-attention--maybe-refresh-dashboard)))
 
 (defun agent-shell-attention--clear-busy (buffer)
@@ -1210,7 +1269,7 @@ ACTIVE-COUNT is accepted for API compatibility but ignored."
                         (gethash buffer agent-shell-attention--last-event))
               (remove-hook 'kill-buffer-hook
                            #'agent-shell-attention--on-buffer-killed t)))))))
-  (force-mode-line-update t)
+  (agent-shell-attention--schedule-indicator-update)
   (agent-shell-attention--maybe-refresh-dashboard))
 
 (defun agent-shell-attention--tool-call-awaits-permission-p (tool-call)
@@ -1265,7 +1324,7 @@ When FORCE is non-nil, mark the buffer even if it's currently selected."
                      (cons label now))
                    agent-shell-attention--pending))
         (agent-shell-attention--ensure-mode-line-entry)
-        (force-mode-line-update t)
+        (agent-shell-attention--schedule-indicator-update)
         (agent-shell-attention--maybe-refresh-dashboard)))))
 
 (defun agent-shell-attention--handle-success (buffer response)
@@ -1356,6 +1415,7 @@ When FORCE is non-nil, mark the buffer even if it's currently selected."
                           (when (buffer-live-p buffer)
                             (agent-shell-attention--handle-event buffer event))))
              agent-shell-attention--subscriptions)
+    (agent-shell-attention--schedule-indicator-update)
     (with-current-buffer buffer
       (add-hook 'kill-buffer-hook
                 #'agent-shell-attention--on-buffer-killed nil t))))
@@ -1442,10 +1502,25 @@ Intercept completions to track buffers awaiting user input."
     (with-current-buffer buffer
       (when (derived-mode-p 'agent-shell-mode)
         (agent-shell-attention--subscribe-buffer buffer))))
+  ;; Reconcile requests that start or finish outside our command advice.
+  ;; Redisplay itself must never scan buffers or switch their local bindings.
+  (unless (timerp agent-shell-attention--indicator-timer)
+    (setq agent-shell-attention--indicator-timer
+          (run-at-time 1 1 #'agent-shell-attention--update-indicator)))
+  (agent-shell-attention--update-indicator)
   (force-mode-line-update t))
 
 (defun agent-shell-attention--disable ()
   "Disable hooks and clear all pending/busy markers."
+  (dolist (timer (list agent-shell-attention--indicator-timer
+                      agent-shell-attention--indicator-update-timer))
+    (when (timerp timer)
+      (cancel-timer timer)))
+  (setq agent-shell-attention--indicator-timer nil
+        agent-shell-attention--indicator-update-timer nil
+        agent-shell-attention--indicator-error-reported nil
+        agent-shell-attention--reconciled-state-changed nil
+        agent-shell-attention--indicator-counts '(0 . 0))
   ;; Remove from both possible locations.
   (let ((indicator agent-shell-attention--mode-line))
     (setq mode-line-misc-info
