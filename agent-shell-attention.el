@@ -166,6 +166,14 @@ existing window showing the buffer in the current frame.  If
 frame."
   :type 'sexp)
 
+(defcustom agent-shell-attention-before-jump-hook nil
+  "Hook run before visiting an agent-shell session.
+Each function receives the session's live shell buffer, even when
+an existing viewport will be displayed.  Use this to activate the
+owning workspace before display and pending-state clearing.
+This also runs for dashboard visits in another window."
+  :type 'hook)
+
 (defvar agent-shell-attention--pending (make-hash-table :test #'eq)
   "Table of `agent-shell-mode' buffers awaiting user input.")
 
@@ -697,6 +705,7 @@ CANDIDATES is an alist of (DISPLAY . (BUFFER . STATUS))."
 When `agent-shell-prefer-viewport-interaction' is non-nil and BUFFER
 has an existing viewport buffer, switch to the viewport instead."
   (when (buffer-live-p buffer)
+    (run-hook-with-args 'agent-shell-attention-before-jump-hook buffer)
     (unless (agent-shell-attention--permission-pending-p buffer)
       (agent-shell-attention--clear-buffer buffer))
     (let ((target (if (and (boundp 'agent-shell-prefer-viewport-interaction)
@@ -1014,6 +1023,7 @@ visible, then right-aligned by tabulated-list."
   (interactive)
   (when-let* ((buffer (agent-shell-attention-dashboard--selected-live-buffer)))
     (let ((agent-shell-attention--dashboard-preserve-row t))
+      (run-hook-with-args 'agent-shell-attention-before-jump-hook buffer)
       (unless (agent-shell-attention--permission-pending-p buffer)
         (agent-shell-attention--clear-buffer buffer))
       (switch-to-buffer-other-window buffer))))
