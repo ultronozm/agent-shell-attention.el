@@ -102,6 +102,36 @@ KnockKnock notifications (see [[https://github.com/konrad1977/knockknock][knockk
 - If you want imenu-like group headings in =C-u M-x agent-shell-attention-jump= (some completion UIs support this), set =agent-shell-attention-jump-show-groups= to non-nil.
   By default, the jump command will switch tabs if the agent buffer is already visible in another tab.  After jumping, you can return to your previous tab with =M-x tab-recent=.
 
+** Workspace activation
+
+The =agent-shell-attention-before-jump-hook= runs before display and pending-state
+clearing.  Each function receives the live shell buffer, even when an existing
+viewport will be shown.  It also runs for dashboard visits, including =o=.
+An error or quit in the hook leaves pending state unchanged.
+
+For Doom's workspaces module, this opt-in recipe activates the workspace owning
+the shell.  If several workspaces contain it, the recipe asks which one to use.
+No workspace is created.
+
+#+begin_src emacs-lisp
+(defun my/agent-shell-attention-switch-workspace (buffer)
+  (when (bound-and-true-p persp-mode)
+    (let ((names
+           (mapcar #'safe-persp-name
+                   (seq-filter
+                    (lambda (workspace)
+                      (+workspace-contains-buffer-p buffer workspace))
+                    (+workspace-list)))))
+      (when names
+        (+workspace-switch
+         (if (cdr names)
+             (completing-read "Session workspace: " names nil t)
+           (car names)))))))
+
+(add-hook 'agent-shell-attention-before-jump-hook
+          #'my/agent-shell-attention-switch-workspace)
+#+end_src
+
 * Example configuration
 
 Here is a complete example config using [[https://github.com/progfolio/elpaca][elpaca]]:
