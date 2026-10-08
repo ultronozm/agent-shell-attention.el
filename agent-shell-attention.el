@@ -3,6 +3,8 @@
 ;; Copyright (C) 2025  Paul D. Nelson
 
 ;; Author: Paul D. Nelson <ultrono@gmail.com>
+;; Assisted-by: Codex:gpt-6
+;; Maintainer: Paul D. Nelson <ultrono@gmail.com>
 ;; Version: 0.0.3
 ;; URL: https://github.com/ultronozm/agent-shell-attention.el
 ;; Package-Requires: ((emacs "29.1") (agent-shell "0.47.1"))
@@ -30,6 +32,9 @@
 ;; can optionally issue notifications via a user-defined function.
 ;;
 ;; It also includes a renderer for an `AS:n/m' pending/active indicator.
+;; `agent-shell-attention-jump-idle' returns to an idle shell, or offers
+;; completion with a prefix argument.  `agent-shell-attention-dashboard'
+;; lists all sessions with their status and last activity.
 ;;
 ;; Enable with (agent-shell-attention-mode).
 ;;
@@ -38,6 +43,7 @@
 (require 'cl-lib)
 (require 'easymenu)
 (require 'map)
+(require 'seq)
 (require 'subr-x)
 (require 'tabulated-list)
 
@@ -224,7 +230,7 @@ Applies to both pending-only and pending+active renderers."
   :type 'boolean)
 
 (defcustom agent-shell-attention-jump-show-groups nil
-  "When non-nil, group prefix-arg jump candidates by status.
+  "When non-nil, group jump candidates by status when using a prefix argument.
 
 Grouping relies on completion UIs honoring completion metadata
 `group-function'.  When nil, candidates are still ordered with pending
@@ -496,6 +502,7 @@ subscriptions rather than scanning every Emacs buffer."
 
 (defun agent-shell-attention--compute-active-count (pending-count &optional subscribed-only)
   "Return number of unique buffers that are pending or busy.
+PENDING-COUNT is the number of buffers awaiting a reply.
 Pass SUBSCRIBED-ONLY to `agent-shell-attention--busy-live-buffers'."
   (let ((count pending-count))
     (dolist (buffer (agent-shell-attention--busy-live-buffers subscribed-only))
@@ -751,15 +758,19 @@ CANDIDATES is an alist of (DISPLAY . (BUFFER . STATUS))."
                              (if (/= ia ib)
                                  (< ia ib)
                                (string-lessp a b))))))))
-    (completion-table-with-metadata
-     displays
-     (append
-      `((category . agent-shell-attention)
-        (display-sort-function . ,sorter)
-        (annotation-function . ,annotation)
-        (affixation-function . ,affixation))
-      (when agent-shell-attention-jump-show-groups
-        `((group-function . ,group)))))))
+    ;; Keep the completion table usable on Emacs 29.
+    (let ((metadata
+           (append
+            `((category . agent-shell-attention)
+              (display-sort-function . ,sorter)
+              (annotation-function . ,annotation)
+              (affixation-function . ,affixation))
+            (when agent-shell-attention-jump-show-groups
+              `((group-function . ,group))))))
+      (lambda (string predicate action)
+        (if (eq action 'metadata)
+            (cons 'metadata metadata)
+          (complete-with-action action displays string predicate))))))
 
 (defun agent-shell-attention--jump-to-buffer (buffer)
   "Switch to BUFFER, clearing pending state when appropriate.
@@ -791,7 +802,7 @@ ENTRIES is an alist of (BUFFER . ENTRY)."
            entries)))
 
 (defun agent-shell-attention--double-prefix-arg-p (prefix)
-  "Return non-nil when PREFIX corresponds to `C-u C-u'."
+  "Return non-nil when PREFIX is a double universal prefix argument."
   (or (equal prefix '(16))
       (and (integerp prefix) (= prefix 16))))
 
@@ -1333,7 +1344,8 @@ ACTIVE-COUNT is accepted for API compatibility but ignored."
     (buffer label &key force request-id tool-call-id)
   "Mark BUFFER as waiting for user input with LABEL description.
 
-When FORCE is non-nil, mark the buffer even if it's currently selected."
+When FORCE is non-nil, mark the buffer even if it's currently selected.
+REQUEST-ID and TOOL-CALL-ID identify a pending permission request."
   (when (buffer-live-p buffer)
     (let ((should-track (or force
                             (agent-shell-attention--should-notify-buffer buffer))))

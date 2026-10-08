@@ -1,5 +1,12 @@
 #+title: agent-shell-attention NEWS
 
+* Unreleased
+
+** Fix completion on older Emacs versions
+
+The jump commands no longer depend on a completion helper missing from
+Emacs 29, the minimum supported version.
+
 * Version 0.0.3 (2026-10-08)
 
 ** Return to idle agent shells
