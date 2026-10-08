@@ -2,6 +2,8 @@
 
 Small add-on for [[https://github.com/xenodium/agent-shell][agent-shell]] that keeps track of which agent buffers are waiting for your input and shows a compact indicator in the mode line.
 
+See [[file:NEWS.org][NEWS]] for user-visible changes.
+
 * Installation
 
 Install =agent-shell-attention= from this repository with your preferred

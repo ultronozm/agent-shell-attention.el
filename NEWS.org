@@ -1,0 +1,17 @@
+#+title: agent-shell-attention NEWS
+
+* Unreleased
+
+** Return to idle agent shells
+
+The new command =agent-shell-attention-jump-idle= visits the most recently
+visited idle shell.  Bury a shell with =M-x bury-buffer= to put it behind
+the others without closing it.  With a prefix argument, the command offers
+completion over idle shells in buffer order.  Shells awaiting replies or
+running requests are excluded.
+
+To bind the command alongside =agent-shell-attention-jump=:
+
+#+begin_src emacs-lisp
+(keymap-global-set "C-z b" #'agent-shell-attention-jump-idle)
+#+end_src
