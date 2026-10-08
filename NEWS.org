@@ -1,6 +1,6 @@
 #+title: agent-shell-attention NEWS
 
-* Unreleased
+* Version 0.0.3 (2026-10-08)
 
 ** Return to idle agent shells
 
