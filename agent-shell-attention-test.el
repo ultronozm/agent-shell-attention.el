@@ -774,7 +774,10 @@
          (first (generate-new-buffer " *asa-dashboard-visit-a*"))
          (second (generate-new-buffer " *asa-dashboard-visit-b*"))
          (dashboard (get-buffer-create agent-shell-attention-dashboard-buffer-name))
-         (visited nil))
+         (visited nil)
+         (hooked nil)
+         (agent-shell-attention-before-jump-hook
+          (list (lambda (buffer) (setq hooked buffer)))))
     (unwind-protect
         (progn
           (dolist (buffer (list first second))
@@ -802,6 +805,8 @@
                          (setq visited buffer))))
               (agent-shell-attention-dashboard-visit-other-window))
             (should (eq visited first))
+            (should (eq hooked first))
+            (should-not (gethash first agent-shell-attention--pending))
             (should (eq (tabulated-list-get-id) second))))
       (dolist (buffer (list first second dashboard))
         (when (buffer-live-p buffer)
