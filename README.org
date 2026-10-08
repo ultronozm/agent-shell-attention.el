@@ -26,6 +26,12 @@ When one or more agent buffers need attention, an =AS:n= indicator appears in th
   - With =C-u C-u=, open a dashboard for all live =agent-shell= buffers, sorted by status (awaiting, running, idle), with last-active timestamps and status text (=Idle=, =Awaiting=, =Running=, or =Permissions: (...)=).  You can also call =M-x agent-shell-attention-dashboard= directly.
     In the dashboard, =RET= visits the session, =o= visits in another window, =j= opens the session's ambient directory, and =D= kills the selected session.
 
+- =M-x agent-shell-attention-jump-idle=:
+  - Without a prefix argument, return to the most recently visited idle shell.
+    Use =M-x bury-buffer= to put it behind the other idle shells without closing it.
+  - With =C-u=, choose an idle shell with completion, in buffer order.
+  - Shells awaiting replies or running requests are excluded.
+
 "Awaiting reply" prompts clear when you visit the buffer, while "tool permission" prompts remain pending until you actually respond.
 
 The indicator renders a cached count snapshot, so redisplay does not scan
@@ -42,10 +48,11 @@ is reported once until an update succeeds.
 
 * Basic customization
 
-Bind the jump command globally:
+Bind the jump commands globally:
 
 #+begin_src emacs-lisp
 (keymap-global-set "C-z a" #'agent-shell-attention-jump)
+(keymap-global-set "C-z b" #'agent-shell-attention-jump-idle)
 #+end_src
 
 To display the number of pending *and* busy buffers as =AS:n/m=:

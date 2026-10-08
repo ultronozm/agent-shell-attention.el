@@ -686,7 +686,7 @@ unique if multiple entries would otherwise collide."
     (dolist (record records)
       (pcase-let ((`(,buffer ,entry ,status) record))
         (let* ((label (pcase status
-                        ('busy (buffer-name buffer))
+                        ((or 'busy 'idle) (buffer-name buffer))
                         (_ (agent-shell-attention--entry-label buffer entry))))
                (count (gethash label seen 0))
                (unique (if (zerop count)
@@ -702,6 +702,7 @@ unique if multiple entries would otherwise collide."
     ('pending (propertize "Awaiting" 'face 'success))
     ('permission (propertize "Permissions" 'face 'warning))
     ('busy (propertize "Running" 'face 'shadow))
+    ('idle (propertize "Idle" 'face 'shadow))
     (_ (propertize "active" 'face 'shadow))))
 
 (defun agent-shell-attention--completion-annotation (display status-table)
@@ -740,6 +741,7 @@ CANDIDATES is an alist of (DISPLAY . (BUFFER . STATUS))."
                       ('pending "Awaiting")
                       ('permission "Permissions")
                       ('busy "Running")
+                      ('idle "Idle")
                       (_ "Active")))))
          (sorter (lambda (completions)
                    (sort (copy-sequence completions)
@@ -1180,6 +1182,33 @@ Without PROMPT, jump to the oldest pending buffer."
       (if (null sorted)
           (message "No agent-shell buffers awaiting replies")
         (agent-shell-attention--jump-to-buffer (caar sorted)))))))
+
+;;;###autoload
+(defun agent-shell-attention-jump-idle (&optional prompt)
+  "Jump to the most recently visited idle agent-shell buffer.
+Use buffer order, so `bury-buffer' puts a shell behind the others.
+Exclude buffers with pending replies or in-flight requests.
+With PROMPT (prefix argument), choose an idle buffer with completion."
+  (interactive "P")
+  (let* ((pending (agent-shell-attention--pending-live-entries))
+         (buffers (cl-remove-if
+                   (lambda (buffer)
+                     (or (assq buffer pending)
+                         (agent-shell-attention--buffer-busy-p buffer)))
+                   (agent-shell-attention--live-agent-shell-buffers))))
+    (if (null buffers)
+        (message "No idle agent-shell buffers")
+      (agent-shell-attention--jump-to-buffer
+       (if prompt
+           (let* ((records (mapcar (lambda (buffer) (list buffer nil 'idle))
+                                   buffers))
+                  (candidates (agent-shell-attention--unique-candidates-with-status
+                               records))
+                  (table (agent-shell-attention--completion-table candidates))
+                  (choice (completing-read "Idle agent shell: " table nil t
+                                           nil nil (caar candidates))))
+             (cadr (assoc choice candidates)))
+         (car buffers))))))
 
 (defun agent-shell-attention-open-menu (&optional event)
   "Show pending agent-shell buffers in a popup menu.
