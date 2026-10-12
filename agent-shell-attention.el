@@ -51,7 +51,7 @@
 (declare-function agent-shell-subscribe-to "agent-shell")
 (declare-function agent-shell-unsubscribe "agent-shell")
 (declare-function agent-shell--send-command "agent-shell")
-(declare-function dired "dired" (&optional dirname switches))
+(declare-function dired "dired" (dirname &optional switches))
 (declare-function acp-send-request "acp")
 (declare-function agent-shell-viewport--buffer "agent-shell-viewport")
 (declare-function agent-shell-viewport--shell-buffer "agent-shell-viewport")
@@ -551,12 +551,12 @@ notifications the same way the shell buffer itself does."
     (_ "Finished")))
 
 (defun agent-shell-attention--extract-message (object)
-  "Return best-effort message string from OBJECT."
+  "Return a message or error code from OBJECT, if available."
   (cond
    ((stringp object) object)
-   ((null object) nil)
-   (t (or (ignore-errors (map-elt object 'message))
-          (ignore-errors (map-elt object 'code))))))
+   ((mapp object)
+    (or (map-elt object 'message)
+        (map-elt object 'code)))))
 
 (defun agent-shell-attention--sanitize-summary (summary)
   "Return SUMMARY as a compact single-line string."
@@ -1467,9 +1467,9 @@ REQUEST-ID and TOOL-CALL-ID identify a pending permission request."
     (remhash buffer agent-shell-attention--subscriptions)
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (when (boundp 'agent-shell--state)
-          (ignore-errors
-            (agent-shell-unsubscribe :subscription subscription)))))))
+        (when (and (derived-mode-p 'agent-shell-mode)
+                   (bound-and-true-p agent-shell--state))
+          (agent-shell-unsubscribe :subscription subscription))))))
 
 (defun agent-shell-attention--maybe-subscribe-current-buffer ()
   "Subscribe the current buffer when it is an `agent-shell-mode' buffer."
