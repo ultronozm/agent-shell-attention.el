@@ -51,6 +51,7 @@
 (declare-function agent-shell-subscribe-to "agent-shell")
 (declare-function agent-shell-unsubscribe "agent-shell")
 (declare-function agent-shell--send-command "agent-shell")
+(declare-function agent-shell--config-icon "agent-shell")
 (declare-function dired "dired" (dirname &optional switches))
 (declare-function acp-send-request "acp")
 (declare-function agent-shell-viewport--buffer "agent-shell-viewport")
@@ -712,10 +713,17 @@ unique if multiple entries would otherwise collide."
     ('idle (propertize "Idle" 'face 'shadow))
     (_ (propertize "active" 'face 'shadow))))
 
-(defun agent-shell-attention--completion-annotation (display status-table)
-  "Return completion annotation string for DISPLAY using STATUS-TABLE."
-  (let ((status (gethash display status-table)))
-    (concat " [" (agent-shell-attention--completion-tag status) "]")))
+(defun agent-shell-attention--completion-title (buffer)
+  "Return BUFFER's session title as a single, short line."
+  (with-current-buffer buffer
+    (truncate-string-to-width
+     (string-trim
+      (car (split-string
+            (or (map-nested-elt (bound-and-true-p agent-shell--state)
+                                '(:session :title))
+                "")
+            "\n")))
+     50 nil nil "…")))
 
 (defun agent-shell-attention--completion-table (candidates)
   "Return completion table for CANDIDATES with ordering and annotations.
@@ -732,14 +740,21 @@ CANDIDATES is an alist of (DISPLAY . (BUFFER . STATUS))."
                           (dolist (candidate candidates)
                             (puthash (car candidate) (cddr candidate) table))
                           table))
-         (annotation (lambda (display)
-                       (agent-shell-attention--completion-annotation display status-table)))
+         (name-width (apply #'max 0 (mapcar #'string-width displays)))
+         (status-width
+          (apply #'max 0
+                 (mapcar (lambda (candidate)
+                           (string-width
+                            (agent-shell-attention--completion-tag (cddr candidate))))
+                         candidates)))
+         (details (make-hash-table :test #'equal))
+         (icons (make-hash-table :test #'equal))
+         (annotation (lambda (display) (gethash display details "")))
          (affixation (lambda (completions)
                        (mapcar (lambda (completion)
                                  (let* ((display completion))
-                                   (list display ""
-                                         (agent-shell-attention--completion-annotation
-                                          display status-table))))
+                                   (list display (gethash display icons "")
+                                         (funcall annotation display))))
                                completions)))
          (group (lambda (display transform)
                   (if transform
@@ -758,6 +773,24 @@ CANDIDATES is an alist of (DISPLAY . (BUFFER . STATUS))."
                              (if (/= ia ib)
                                  (< ia ib)
                                (string-lessp a b))))))))
+    (dolist (candidate candidates)
+      (let* ((display (car candidate))
+             (buffer (cadr candidate))
+             (tag (agent-shell-attention--completion-tag (cddr candidate))))
+        (puthash display
+                 (concat (make-string (+ 2 (- name-width (string-width display))) ?\s)
+                         tag
+                         (make-string (+ 2 (- status-width (string-width tag))) ?\s)
+                         (propertize (agent-shell-attention--completion-title buffer)
+                                     'face 'font-lock-doc-face))
+                 details)
+        (when (and (bound-and-true-p agent-shell-show-config-icons)
+                   (fboundp 'agent-shell--config-icon))
+          (with-current-buffer buffer
+            (when-let* ((icon (agent-shell--config-icon
+                              :config (map-elt (bound-and-true-p agent-shell--state)
+                                               :agent-config))))
+              (puthash display (concat icon " ") icons))))))
     ;; Keep the completion table usable on Emacs 29.
     (let ((metadata
            (append

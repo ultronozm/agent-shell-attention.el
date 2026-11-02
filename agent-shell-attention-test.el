@@ -466,6 +466,24 @@
       (when (buffer-live-p pending-buf) (kill-buffer pending-buf))
       (when (buffer-live-p busy-buf) (kill-buffer busy-buf)))))
 
+(ert-deftest agent-shell-attention--completion-presentation ()
+  (with-temp-buffer
+    (agent-shell-mode)
+    (setq agent-shell--state '((:session (:title . "A session title\nMore details"))))
+    (let* ((candidates (list (cons "Short" (cons (current-buffer) 'idle))
+                             (cons "Longer name" (cons (current-buffer) 'permission))))
+           (table (agent-shell-attention--completion-table candidates))
+           (meta (completion-metadata "" table nil))
+           (affix (completion-metadata-get meta 'affixation-function))
+           (rows (funcall affix '("Short" "Longer name")))
+           (lines (mapcar (lambda (row) (apply #'concat row)) rows)))
+      (should (= (string-match "Idle" (car lines))
+                 (string-match "Permissions" (cadr lines))))
+      (should (= (string-match "A session title" (car lines))
+                 (string-match "A session title" (cadr lines))))
+      (should-not (string-match-p "More details" (car lines)))
+      (should (equal (mapcar #'car rows) '("Short" "Longer name"))))))
+
 (ert-deftest agent-shell-attention--completion-table-group-function-protocol ()
   (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
         (agent-shell-attention--busy (make-hash-table :test #'eq))
@@ -717,7 +735,7 @@
                          (should (equal (all-completions "" table) names))
                          (should (equal (funcall sorter (reverse names)) names))
                          (should (equal (substring-no-properties
-                                         (funcall annotation (car names))) " [Idle]"))
+                                         (funcall annotation (car names))) "  Idle  "))
                          (should (equal (funcall group (car names) nil) "Idle")))
                        (buffer-name a))))
             (agent-shell-attention-jump-idle '(4))
