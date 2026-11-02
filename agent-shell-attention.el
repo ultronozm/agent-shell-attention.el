@@ -1439,6 +1439,7 @@ When FORCE is non-nil, mark the buffer even if it's currently selected.
 REQUEST-ID and TOOL-CALL-ID identify a pending permission request."
   (when (buffer-live-p buffer)
     (let ((should-track (or force
+                            agent-shell-attention-inhibit-auto-acknowledge
                             (agent-shell-attention--should-notify-buffer buffer))))
       (when should-track
         (let ((now (float-time)))
