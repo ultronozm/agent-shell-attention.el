@@ -31,7 +31,8 @@ When one or more agent buffers need attention, an =AS:n= indicator appears in th
 - =M-x agent-shell-attention-jump-idle=:
   - Without a prefix argument, return to the most recently visited idle shell.
     Use =M-x bury-buffer= to put it behind the other idle shells without closing it.
-  - With =C-u=, choose an idle shell with completion, in buffer order.
+  - Visits through associated viewport buffers also count toward recency.
+  - With =C-u=, choose an idle shell with completion, in the same order.
   - Shells awaiting replies or running requests are excluded.
 
 "Awaiting reply" prompts clear when you visit the buffer, while "tool permission" prompts remain pending until you actually respond.

@@ -12,6 +12,8 @@
 (define-derived-mode agent-shell-mode fundamental-mode "agent-shell")
 (defvar-local agent-shell--state nil)
 (defvar agent-shell-prefer-viewport-interaction nil)
+(defun agent-shell-buffers ()
+  (agent-shell-attention--live-agent-shell-buffers))
 
 (ert-deftest agent-shell-attention--indicator-uses-snapshot-during-redisplay ()
   (let ((agent-shell-attention--indicator-counts '(2 . 3))
@@ -706,6 +708,20 @@
             (should (eq chosen b))))
       (dolist (buffer (list a b busy pending))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(ert-deftest agent-shell-attention-jump-idle-uses-agent-shell-order ()
+  (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
+        (agent-shell-attention--busy (make-hash-table :test #'eq)))
+    (with-temp-buffer
+      (agent-shell-mode)
+      (let ((shell (current-buffer)) chosen)
+        (cl-letf (((symbol-function 'agent-shell-buffers) (lambda () (list shell)))
+                  ((symbol-function 'agent-shell-attention--live-agent-shell-buffers)
+                   (lambda () (ert-fail "Used shell-only buffer order")))
+                  ((symbol-function 'agent-shell-attention--jump-to-buffer)
+                   (lambda (buffer) (setq chosen buffer))))
+          (agent-shell-attention-jump-idle)
+          (should (eq chosen shell)))))))
 
 (ert-deftest agent-shell-attention-jump-idle-completion-and-empty ()
   (let ((agent-shell-attention--pending (make-hash-table :test #'eq))

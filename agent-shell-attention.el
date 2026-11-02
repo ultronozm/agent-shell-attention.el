@@ -52,6 +52,7 @@
 (declare-function agent-shell-unsubscribe "agent-shell")
 (declare-function agent-shell--send-command "agent-shell")
 (declare-function agent-shell--config-icon "agent-shell")
+(declare-function agent-shell-buffers "agent-shell")
 (declare-function dired "dired" (dirname &optional switches))
 (declare-function acp-send-request "acp")
 (declare-function agent-shell-viewport--buffer "agent-shell-viewport")
@@ -1252,16 +1253,19 @@ Without PROMPT, jump to the oldest pending buffer."
 ;;;###autoload
 (defun agent-shell-attention-jump-idle (&optional prompt)
   "Jump to the most recently visited idle agent-shell buffer.
-Use buffer order, so `bury-buffer' puts a shell behind the others.
+Count visits through associated viewport buffers as visits to the shell.
+Use buffer order, so `bury-buffer' puts a buffer behind the others.
 Exclude buffers with pending replies or in-flight requests.
 With PROMPT (prefix argument), choose an idle buffer with completion."
   (interactive "P")
+  (unless (fboundp 'agent-shell-buffers)
+    (require 'agent-shell))
   (let* ((pending (agent-shell-attention--pending-live-entries))
          (buffers (cl-remove-if
                    (lambda (buffer)
                      (or (assq buffer pending)
                          (agent-shell-attention--buffer-busy-p buffer)))
-                   (agent-shell-attention--live-agent-shell-buffers))))
+                   (agent-shell-buffers))))
     (if (null buffers)
         (message "No idle agent-shell buffers")
       (agent-shell-attention--jump-to-buffer
