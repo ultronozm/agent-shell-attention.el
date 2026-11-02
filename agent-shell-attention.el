@@ -713,6 +713,14 @@ unique if multiple entries would otherwise collide."
     ('idle (propertize "Idle" 'face 'shadow))
     (_ (propertize "active" 'face 'shadow))))
 
+(defun agent-shell-attention--buffer-icon (buffer)
+  "Return BUFFER's agent icon when config icons are enabled."
+  (when (and (bound-and-true-p agent-shell-show-config-icons)
+             (fboundp 'agent-shell--config-icon))
+    (with-current-buffer buffer
+      (agent-shell--config-icon
+       :config (map-elt (bound-and-true-p agent-shell--state) :agent-config)))))
+
 (defun agent-shell-attention--completion-title (buffer)
   "Return BUFFER's session title as a single, short line."
   (with-current-buffer buffer
@@ -784,13 +792,8 @@ CANDIDATES is an alist of (DISPLAY . (BUFFER . STATUS))."
                          (propertize (agent-shell-attention--completion-title buffer)
                                      'face 'font-lock-doc-face))
                  details)
-        (when (and (bound-and-true-p agent-shell-show-config-icons)
-                   (fboundp 'agent-shell--config-icon))
-          (with-current-buffer buffer
-            (when-let* ((icon (agent-shell--config-icon
-                              :config (map-elt (bound-and-true-p agent-shell--state)
-                                               :agent-config))))
-              (puthash display (concat icon " ") icons))))))
+        (when-let* ((icon (agent-shell-attention--buffer-icon buffer)))
+          (puthash display (concat icon " ") icons))))
     ;; Keep the completion table usable on Emacs 29.
     (let ((metadata
            (append
@@ -988,13 +991,24 @@ visible, then right-aligned by tabulated-list."
    (lambda (record)
      (let* ((buffer (plist-get record :buffer))
             (activity-time (plist-get record :activity-time))
-            (timestamp (agent-shell-attention--format-timestamp activity-time)))
+            (timestamp (agent-shell-attention--format-timestamp activity-time))
+            (status (plist-get record :status-text))
+            (tag (agent-shell-attention--completion-tag
+                  (if (string-prefix-p "Permissions" status)
+                      'permission
+                    (plist-get record :status))))
+            (icon (agent-shell-attention--buffer-icon buffer)))
        (list buffer
              (vector
-              (agent-shell-attention--dashboard-buffer-name
-               (plist-get record :name))
-              timestamp
-              (plist-get record :status-text)))))
+              (concat (when icon (concat icon " "))
+                      (propertize
+                       (agent-shell-attention--dashboard-buffer-name
+                        (plist-get record :name))
+                       'face 'font-lock-variable-name-face))
+              (propertize timestamp 'face 'shadow)
+              (propertize status 'face (get-text-property 0 'face tag))
+              (propertize (agent-shell-attention--completion-title buffer)
+                          'face 'font-lock-doc-face)))))
    records))
 
 (defun agent-shell-attention--dashboard-current-row-index ()
@@ -1110,6 +1124,13 @@ visible, then right-aligned by tabulated-list."
          (records (agent-shell-attention--dashboard-records))
          (entries (agent-shell-attention--dashboard-entries records)))
     (setq header-line-format (agent-shell-attention--dashboard-header-line records))
+    (let ((width (apply #'max 12
+                        (mapcar (lambda (entry)
+                                  (string-width (aref (cadr entry) 2)))
+                                entries))))
+      (unless (= width (cadr (aref tabulated-list-format 2)))
+        (setcar (cdr (aref tabulated-list-format 2)) width)
+        (tabulated-list-init-header)))
     (setq tabulated-list-entries entries)
     (tabulated-list-print (not agent-shell-attention--dashboard-preserve-row))
     (when-let* ((position (agent-shell-attention--dashboard-position-for-state
@@ -1176,7 +1197,8 @@ If the row is stale, show an explanatory message and refresh."
          `("Buffer" ,agent-shell-attention-dashboard-buffer-column-width t
            :right-align t)
          `("Last active" ,(agent-shell-attention--dashboard-time-column-width) nil)
-         '("Status" 0 t)))
+         (list "Status" 12 t)
+         '("Session" 0 t)))
   (setq tabulated-list-padding 2)
   (setq tabulated-list-sort-key nil)
   (add-hook 'tabulated-list-revert-hook

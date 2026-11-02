@@ -1016,6 +1016,21 @@
     (should (stringp timestamp))
     (should-not (get-text-property 0 'help-echo timestamp))))
 
+(ert-deftest agent-shell-attention--dashboard-entry-presentation ()
+  (with-temp-buffer
+    (agent-shell-mode)
+    (setq agent-shell--state '((:session (:title . "Session title\nDetails"))))
+    (cl-letf (((symbol-function 'agent-shell-attention--buffer-icon)
+               (lambda (_) "ICON")))
+      (let* ((record (list :buffer (current-buffer) :name "buf"
+                           :status 'pending :status-text "Permissions: (tool)"))
+             (row (car (agent-shell-attention--dashboard-entries (list record))))
+             (cols (cadr row)))
+        (should (eq (car row) (current-buffer)))
+        (should (equal (aref cols 0) "ICON buf"))
+        (should (eq (get-text-property 0 'face (aref cols 2)) 'warning))
+        (should (equal (aref cols 3) "Session title"))))))
+
 (ert-deftest agent-shell-attention-dashboard-mode-buffer-column-customized ()
   (let ((agent-shell-attention-dashboard-buffer-column-width 24))
     (with-temp-buffer
