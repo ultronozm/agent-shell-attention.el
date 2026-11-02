@@ -179,3 +179,10 @@ Here is a complete example config using [[https://github.com/progfolio/elpaca][e
   (setopt agent-shell-attention-indicator-location 'global-mode-string)
   (agent-shell-attention-mode))
 #+end_src
+
+* Integration
+
+Session browsers can use =agent-shell-attention-unread-p= to query unread
+replies and =agent-shell-attention-acknowledge= to mark them as read.
+Bind =agent-shell-attention-inhibit-auto-acknowledge= during previews,
+then acknowledge the confirmed selection.  Permission prompts remain pending.

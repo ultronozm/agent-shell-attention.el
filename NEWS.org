@@ -2,6 +2,14 @@
 
 * Unreleased
 
+** Public interface for session browsers
+
+Session interfaces can query unread replies with
+=agent-shell-attention-unread-p= and acknowledge them with
+=agent-shell-attention-acknowledge=, preserving outstanding permissions.
+Bind =agent-shell-attention-inhibit-auto-acknowledge= during previews to
+leave replies unread until a selection is confirmed.
+
 ** Fix completion on older Emacs versions
 
 The jump commands no longer depend on a completion helper missing from

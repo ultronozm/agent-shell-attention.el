@@ -633,17 +633,50 @@ TIMESTAMP defaults to current time."
       (agent-shell-attention--schedule-indicator-update)
       (agent-shell-attention--maybe-refresh-dashboard))))
 
+(defvar agent-shell-attention-inhibit-auto-acknowledge nil
+  "Non-nil suppresses acknowledgment caused by buffer selection.
+Bind this around temporary previews.  Explicit calls to
+`agent-shell-attention-acknowledge' still take effect.")
+
+(defun agent-shell-attention--resolve-buffer (buffer)
+  "Return the shell associated with live shell or viewport BUFFER."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (cond
+       ((derived-mode-p 'agent-shell-mode) buffer)
+       ((and (derived-mode-p 'agent-shell-viewport-view-mode
+                             'agent-shell-viewport-edit-mode)
+             (fboundp 'agent-shell-viewport--shell-buffer))
+        (let ((shell (agent-shell-viewport--shell-buffer buffer)))
+          (when (and (buffer-live-p shell)
+                     (with-current-buffer shell
+                       (derived-mode-p 'agent-shell-mode)))
+            shell)))))))
+
+(defun agent-shell-attention-unread-p (buffer)
+  "Return non-nil when BUFFER's session has an unread reply.
+Permission prompts alone do not count as unread replies, and sessions
+with outstanding permissions return nil.
+BUFFER may be a shell or associated viewport buffer.  Dead or unrelated
+buffers return nil.  This function does not acknowledge the reply."
+  (when-let* ((shell (agent-shell-attention--resolve-buffer buffer))
+              (entry (gethash shell agent-shell-attention--pending)))
+    (and (not (agent-shell-attention--pending-entry-permission-p entry))
+         (not (agent-shell-attention--permission-pending-p shell)))))
+
+(defun agent-shell-attention-acknowledge (buffer)
+  "Mark BUFFER's session reply as read, preserving outstanding permissions.
+BUFFER may be a shell or associated viewport buffer.  Dead or unrelated
+buffers are ignored.  Repeated calls are harmless.  This function works
+even when `agent-shell-attention-inhibit-auto-acknowledge' is non-nil."
+  (when-let* ((shell (agent-shell-attention--resolve-buffer buffer)))
+    (unless (agent-shell-attention--permission-pending-p shell)
+      (agent-shell-attention--clear-buffer shell))))
+
 (defun agent-shell-attention--maybe-clear-current ()
-  "Clear the currently selected buffer if it no longer needs attention.
-A selected viewport buffer counts as its session's shell buffer."
-  (when-let* ((buffer (cond ((derived-mode-p 'agent-shell-mode)
-                             (current-buffer))
-                            ((fboundp 'agent-shell-viewport--shell-buffer)
-                             (agent-shell-viewport--shell-buffer
-                              (current-buffer))))))
-    ;; Clear as soon as no outstanding permissions remain.
-    (unless (agent-shell-attention--permission-pending-p buffer)
-      (agent-shell-attention--clear-buffer buffer))))
+  "Acknowledge the selected session unless automatic acknowledgment is inhibited."
+  (unless agent-shell-attention-inhibit-auto-acknowledge
+    (agent-shell-attention-acknowledge (current-buffer))))
 
 ;;; Navigation UI
 
@@ -815,8 +848,7 @@ When `agent-shell-prefer-viewport-interaction' is non-nil and BUFFER
 has an existing viewport buffer, switch to the viewport instead."
   (when (buffer-live-p buffer)
     (run-hook-with-args 'agent-shell-attention-before-jump-hook buffer)
-    (unless (agent-shell-attention--permission-pending-p buffer)
-      (agent-shell-attention--clear-buffer buffer))
+    (agent-shell-attention-acknowledge buffer)
     (let ((target (if (and (boundp 'agent-shell-prefer-viewport-interaction)
                            agent-shell-prefer-viewport-interaction
                            (fboundp 'agent-shell-viewport--buffer))

@@ -287,6 +287,8 @@
           (puthash shell (cons "Needs input" (float-time))
                    agent-shell-attention--pending)
           (with-current-buffer viewport
+            (setq major-mode 'agent-shell-viewport-view-mode)
+            (should (agent-shell-attention-unread-p (current-buffer)))
             (agent-shell-attention--maybe-clear-current))
           (should-not (gethash shell agent-shell-attention--pending)))
       (remhash shell agent-shell-attention--pending)
@@ -307,6 +309,7 @@
           (puthash shell (cons "Permission: write" (float-time))
                    agent-shell-attention--pending)
           (with-current-buffer viewport
+            (setq major-mode 'agent-shell-viewport-view-mode)
             (agent-shell-attention--maybe-clear-current))
           (should (gethash shell agent-shell-attention--pending)))
       (remhash shell agent-shell-attention--pending)
@@ -391,6 +394,7 @@
                    (cdr (assq buffer owners)))))))
     (unwind-protect
         (progn
+          (with-current-buffer shell (agent-shell-mode))
           (tab-bar-mode 1)
           (tab-bar-new-tab)
           (tab-bar-rename-tab "Owner")
@@ -1355,5 +1359,36 @@
         (kill-buffer busy-buf)))))
 
 (provide 'agent-shell-attention-test)
+
+(ert-deftest agent-shell-attention-public-acknowledgment ()
+  (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
+        (agent-shell-attention--busy (make-hash-table :test #'eq))
+        (agent-shell-attention--last-event (make-hash-table :test #'eq)))
+    (with-temp-buffer
+      (agent-shell-mode)
+      (let ((shell (current-buffer))
+            (agent-shell-attention-inhibit-auto-acknowledge t))
+        (puthash shell '("Reply" . 1) agent-shell-attention--pending)
+        (should (agent-shell-attention-unread-p shell))
+        (agent-shell-attention--maybe-clear-current)
+        (should (agent-shell-attention-unread-p shell))
+        (agent-shell-attention-acknowledge shell)
+        (agent-shell-attention-acknowledge shell)
+        (should-not (agent-shell-attention-unread-p shell))
+        (setq agent-shell--state
+              (agent-shell-attention-test--permission-state "req" "tool"))
+        (puthash shell '("Permission: write" . 2) agent-shell-attention--pending)
+        (should-not (agent-shell-attention-unread-p shell))
+        (agent-shell-attention-acknowledge shell)
+        (should (gethash shell agent-shell-attention--pending))))
+    (with-temp-buffer
+      (puthash (current-buffer) '("Unrelated" . 1) agent-shell-attention--pending)
+      (should-not (agent-shell-attention-unread-p (current-buffer)))
+      (agent-shell-attention-acknowledge (current-buffer))
+      (should (gethash (current-buffer) agent-shell-attention--pending)))
+    (let ((dead (generate-new-buffer " *asa-dead*")))
+      (kill-buffer dead)
+      (should-not (agent-shell-attention-unread-p dead))
+      (agent-shell-attention-acknowledge dead))))
 
 ;;; agent-shell-attention-test.el ends here
