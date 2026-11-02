@@ -5,7 +5,7 @@
 ;; Author: Paul D. Nelson <ultrono@gmail.com>
 ;; Assisted-by: Codex:gpt-6
 ;; Maintainer: Paul D. Nelson <ultrono@gmail.com>
-;; Version: 0.0.3
+;; Version: 0.0.4
 ;; URL: https://github.com/ultronozm/agent-shell-attention.el
 ;; Package-Requires: ((emacs "29.1") (agent-shell "0.47.1"))
 ;; Keywords: convenience

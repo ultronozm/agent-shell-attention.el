@@ -1,6 +1,11 @@
 #+title: agent-shell-attention NEWS
 
-* Unreleased
+* Version 0.0.4 (2026-11-02)
+
+** Improve session navigation
+
+Jump pickers and the dashboard show agent icons and session titles.
+Idle navigation now counts visits through viewport buffers.
 
 ** Public interface for session browsers
 
