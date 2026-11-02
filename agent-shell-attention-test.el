@@ -1358,6 +1358,20 @@
       (when (buffer-live-p busy-buf)
         (kill-buffer busy-buf)))))
 
+(ert-deftest agent-shell-attention-preview-keeps-new-reply-unread ()
+  "A reply arriving during a visible preview stays unread."
+  (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
+        (agent-shell-attention--last-event (make-hash-table :test #'eq))
+        (agent-shell-attention-inhibit-auto-acknowledge t))
+    (save-window-excursion
+      (with-temp-buffer
+        (agent-shell-mode)
+        (set-window-buffer (selected-window) (current-buffer))
+        (cl-letf (((symbol-function 'frame-focus-state) (lambda (_) t)))
+          (agent-shell-attention--handle-success
+           (current-buffer) '((stopReason . "end_turn")))
+          (should (agent-shell-attention-unread-p (current-buffer))))))))
+
 (provide 'agent-shell-attention-test)
 
 (ert-deftest agent-shell-attention-public-acknowledgment ()
