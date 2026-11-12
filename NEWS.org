@@ -1,6 +1,8 @@
 #+title: agent-shell-attention NEWS
 
-* Unreleased
+* Version 0.0.5 (2026-11-12)
+
+** Fix parallel permission prompts
 
 Permission prompts remain pending until all prompts in the session have
 been answered.  Responding to the displayed prompt updates its label to
@@ -9,6 +11,11 @@ attention queue.
 
 The minimum supported agent-shell version is now 0.52.2, which clears
 answered permission IDs before emitting permission-response events.
+
+** Keep new replies unread during previews
+
+=agent-shell-attention-inhibit-auto-acknowledge= now also preserves
+unread replies that arrive during a transient session preview.
 
 * Version 0.0.4 (2026-11-02)
 
