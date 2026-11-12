@@ -890,7 +890,7 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest agent-shell-attention--handle-event-permission-response-clears-matching-entry ()
+(ert-deftest agent-shell-attention--handle-event-permission-response-clears-last-entry ()
   (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
         (buffer (generate-new-buffer " *asa-event-permission-clear*")))
     (unwind-protect
@@ -898,8 +898,7 @@
           (with-current-buffer buffer
             (agent-shell-mode)
             (setq agent-shell--state
-                  (agent-shell-attention-test--permission-state
-                   "req-2" "tool-2")))
+                  (make-hash-table :test #'eq)))
           (puthash buffer
                    (list :label "Permission: old"
                          :timestamp 1.0
@@ -915,33 +914,79 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest agent-shell-attention--handle-event-permission-response-keeps-newer-entry ()
-  (let ((agent-shell-attention--pending (make-hash-table :test #'eq))
-        (buffer (generate-new-buffer " *asa-event-permission-keep*")))
-    (unwind-protect
-        (progn
-          (with-current-buffer buffer
+(ert-deftest agent-shell-attention-permissions-clear-after-last-response ()
+  "Parallel permissions remain pending regardless of response order."
+  (dolist (order '(("A" "B") ("B" "A")))
+    (dolist (cancelled '(nil t))
+      (ert-info ((format "Response order %S, cancelled %S" order cancelled))
+        (let ((agent-shell-attention-mode t)
+              (agent-shell-attention--pending (make-hash-table :test #'eq))
+              (agent-shell-attention--busy (make-hash-table :test #'eq))
+              (agent-shell-attention--busy-since (make-hash-table :test #'eq))
+              (agent-shell-attention--last-event (make-hash-table :test #'eq))
+              (agent-shell-attention--subscriptions (make-hash-table :test #'eq))
+              (agent-shell-attention--indicator-counts '(0 . 0)))
+          (with-temp-buffer
             (agent-shell-mode)
-            (setq agent-shell--state
-                  (agent-shell-attention-test--permission-state
-                   "req-2" "tool-2")))
-          (puthash buffer
-                   (list :label "Permission: new"
-                         :timestamp 2.0
-                         :request-id "req-2"
-                         :tool-call-id "tool-2")
-                   agent-shell-attention--pending)
-          (agent-shell-attention--handle-event
-           buffer
-           '((:event . permission-response)
-             (:data . ((:request-id . "req-1")
-                       (:tool-call-id . "tool-1")))))
-          (let ((entry (gethash buffer agent-shell-attention--pending)))
-            (should entry)
-            (should (equal (agent-shell-attention--pending-entry-label entry)
-                           "Permission: new"))))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))))
+            (let ((buffer (current-buffer))
+                  (tool-calls (make-hash-table :test #'equal)))
+              (setq agent-shell--state
+                    (list (cons :active-requests '(request))
+                          (cons :tool-calls tool-calls)))
+              (puthash buffer 'subscription agent-shell-attention--subscriptions)
+              (cl-letf (((symbol-function 'agent-shell-attention--message) #'ignore)
+                        ((symbol-function 'agent-shell-attention--ensure-mode-line-entry)
+                         #'ignore)
+                        ((symbol-function 'agent-shell-attention--schedule-indicator-update)
+                         #'ignore))
+                (dolist (id '("A" "B"))
+                  (let ((tool-call (list (cons :title id)
+                                        (cons :status "pending")
+                                        (cons :permission-request-id
+                                              (concat "req-" id)))))
+                    (puthash id tool-call tool-calls)
+                    (agent-shell-attention--handle-event
+                     buffer `((:event . permission-request)
+                              (:data . ((:request-id . ,(concat "req-" id))
+                                        (:tool-call-id . ,id)
+                                        (:tool-call . ,tool-call)))))))
+                (setf (plist-get (gethash buffer agent-shell-attention--pending)
+                                 :timestamp)
+                      1.0)
+                (dolist (id order)
+                  ;; agent-shell retains the tool call but removes its
+                  ;; permission ID before emitting the response event.
+                  (puthash id (map-delete (gethash id tool-calls)
+                                          :permission-request-id)
+                           tool-calls)
+                  (agent-shell-attention--handle-event
+                   buffer `((:event . permission-response)
+                            (:data . ((:request-id . ,(concat "req-" id))
+                                      (:tool-call-id . ,id)
+                                      (:cancelled . ,cancelled)))))
+                  (agent-shell-attention-acknowledge buffer)
+                  (agent-shell-attention--update-indicator)
+                  (let ((entry (gethash buffer agent-shell-attention--pending))
+                        (record (car (agent-shell-attention--dashboard-records))))
+                    (if (equal id (car order))
+                        (progn
+                          (should entry)
+                          (should (equal agent-shell-attention--indicator-counts '(1 . 1)))
+                          (should (equal (agent-shell-attention--pending-entry-label entry)
+                                         (concat "Permission: " (cadr order))))
+                          (should (equal (agent-shell-attention--pending-entry-request-id entry)
+                                         (concat "req-" (cadr order))))
+                          (should (equal (agent-shell-attention--pending-entry-tool-call-id entry)
+                                         (cadr order)))
+                          (should (= (agent-shell-attention--pending-entry-timestamp entry) 1.0))
+                          (should (eq (nth 2 (car (agent-shell-attention--active-entry-records)))
+                                      'permission))
+                          (should (eq (plist-get record :status) 'pending))
+                          (should (equal (plist-get record :status-text)
+                                         (concat "Permissions: (" (cadr order) ")"))))
+                      (should-not entry)
+                      (should (equal agent-shell-attention--indicator-counts '(0 . 1)))
+                      (should (eq (plist-get record :status) 'busy)))))))))))))
 
 (ert-deftest agent-shell-attention--handle-event-permission-response-clears-legacy-entry ()
   (let ((agent-shell-attention--pending (make-hash-table :test #'eq))

@@ -35,7 +35,9 @@ When one or more agent buffers need attention, an =AS:n= indicator appears in th
   - With =C-u=, choose an idle shell with completion, in the same order.
   - Shells awaiting replies or running requests are excluded.
 
-"Awaiting reply" prompts clear when you visit the buffer, while "tool permission" prompts remain pending until you actually respond.
+"Awaiting reply" prompts clear when you visit the buffer, while "tool permission"
+prompts remain pending until you respond to all outstanding permission prompts
+in that session.
 
 The indicator renders a cached count snapshot, so redisplay does not scan
 buffers.  State changes schedule a coalesced update after callbacks finish.

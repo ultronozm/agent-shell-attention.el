@@ -1,5 +1,15 @@
 #+title: agent-shell-attention NEWS
 
+* Unreleased
+
+Permission prompts remain pending until all prompts in the session have
+been answered.  Responding to the displayed prompt updates its label to
+another outstanding prompt without changing the session's place in the
+attention queue.
+
+The minimum supported agent-shell version is now 0.52.2, which clears
+answered permission IDs before emitting permission-response events.
+
 * Version 0.0.4 (2026-11-02)
 
 ** Improve session navigation

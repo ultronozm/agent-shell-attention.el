@@ -7,7 +7,7 @@
 ;; Maintainer: Paul D. Nelson <ultrono@gmail.com>
 ;; Version: 0.0.4
 ;; URL: https://github.com/ultronozm/agent-shell-attention.el
-;; Package-Requires: ((emacs "29.1") (agent-shell "0.47.1"))
+;; Package-Requires: ((emacs "29.1") (agent-shell "0.52.2"))
 ;; Keywords: convenience
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -1412,8 +1412,9 @@ ACTIVE-COUNT is accepted for API compatibility but ignored."
            (or (null status)
                (equal status "pending"))))))
 
-(defun agent-shell-attention--permission-pending-p (buffer)
-  "Return non-nil when BUFFER still has outstanding permission prompts."
+(defun agent-shell-attention--pending-permission-tool-call (buffer)
+  "Return an outstanding permission in BUFFER as (TOOL-CALL-ID . TOOL-CALL).
+Return nil when no permission prompt remains."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (when (derived-mode-p 'agent-shell-mode)
@@ -1424,12 +1425,17 @@ ACTIVE-COUNT is accepted for API compatibility but ignored."
               (when tool-calls
                 (condition-case nil
                     (catch 'pending
-                      (map-do (lambda (_tool-call-id tool-call)
-                                (when (agent-shell-attention--tool-call-awaits-permission-p tool-call)
-                                  (throw 'pending t)))
+                      (map-do (lambda (tool-call-id tool-call)
+                                (when (agent-shell-attention--tool-call-awaits-permission-p
+                                       tool-call)
+                                  (throw 'pending (cons tool-call-id tool-call))))
                               tool-calls)
                       nil)
                   (error nil))))))))))
+
+(defun agent-shell-attention--permission-pending-p (buffer)
+  "Return non-nil when BUFFER still has outstanding permission prompts."
+  (and (agent-shell-attention--pending-permission-tool-call buffer) t))
 
 (cl-defun agent-shell-attention--mark-buffer
     (buffer label &key force request-id tool-call-id)
@@ -1524,11 +1530,22 @@ REQUEST-ID and TOOL-CALL-ID identify a pending permission request."
           :request-id (map-elt data :request-id)
           :tool-call-id (map-elt data :tool-call-id))))
       ('permission-response
-       (let ((entry (gethash buffer agent-shell-attention--pending)))
-         (when (or (agent-shell-attention--permission-response-matches-p
-                    entry data)
-                   (not (agent-shell-attention--permission-pending-p buffer)))
-           (agent-shell-attention--clear-buffer buffer)))
+       ;; agent-shell removes the answered permission ID before this event.
+       (let ((entry (gethash buffer agent-shell-attention--pending))
+             (remaining (agent-shell-attention--pending-permission-tool-call
+                         buffer)))
+         (cond
+          ((not remaining)
+           (agent-shell-attention--clear-buffer buffer))
+          ((agent-shell-attention--permission-response-matches-p entry data)
+           (puthash buffer
+                    (list :label (agent-shell-attention--permission-label
+                                  (cdr remaining))
+                          :timestamp (agent-shell-attention--pending-entry-timestamp
+                                      entry)
+                          :request-id (map-elt (cdr remaining) :permission-request-id)
+                          :tool-call-id (car remaining))
+                    agent-shell-attention--pending))))
        (force-mode-line-update t)
        (agent-shell-attention--maybe-refresh-dashboard))
       ('turn-complete
